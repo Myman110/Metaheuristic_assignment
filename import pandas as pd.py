@@ -1,10 +1,9 @@
+import os
 import pandas as pd
-import requests
-import io
 import random
 
 # =====================================================================
-# 1. THE HEURISTIC ENGINE (From our previous blueprint)
+# 1. THE HEURISTIC ENGINE
 # =====================================================================
 class PractitionerHeuristic:
     def __init__(self, jobs_data, num_machines, magazine_capacity, tool_setup_time=1.0, theta_m=72.0, weights=(1.0, 1.0)):
@@ -96,31 +95,45 @@ class PractitionerHeuristic:
         objective_val = (self.wd * total_tardiness) + (self.ws * self.tau * total_setups)
         return objective_val, total_tardiness, total_setups, schedule_log
 
-# =====================================================================
-# 2. REMOTE DATA FETCHING & EXECUTION
-# =====================================================================
-def load_and_run_benchmark(instance_name, num_machines, magazine_capacity=80):
-    # Base URL pointing to the raw repository files
-    base_url = "https://raw.githubusercontent.com/vinhise/pmstr-basecases/master/"
-    file_url = f"{base_url}{instance_name}"
-    
-    print(f"Fetching case file: {file_url}...")
-    response = requests.get(file_url)
-    
-    if response.status_code != 200:
-        raise FileNotFoundError(f"Could not retrieve instance '{instance_name}'. Check name format.")
 
-    # Parse dataset (handling variable whitespaces/tabs often present in TXT matrices)
-    df = pd.read_csv(io.StringIO(response.text), sep=r'\s+', header=None)
+# =====================================================================
+# 2. LOCAL FILE LOADING & EXECUTION
+# =====================================================================
+def load_and_run_local_benchmark(filepath):
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"The file path does not exist: {filepath}")
+
+    # Step A: Parse metadata rows at the top of the CSV (Lines 1-4)
+    num_machines = 2       # Default fallback
+    magazine_capacity = 80 # Default fallback
+    
+    try:
+        with open(filepath, 'r') as f:
+            for _ in range(5):
+                line = f.readline().strip()
+                if not line:
+                    continue
+                parts = line.split(',')
+                if len(parts) >= 2:
+                    if parts[0] == 'M':
+                        num_machines = int(parts[1])
+                    elif parts[0] == 'C':
+                        magazine_capacity = int(parts[1])
+    except Exception as e:
+        print(f"Could not parse file metadata: {e}. Proceeding with defaults.")
+
+    # Step B: Read the operations data. Skip first 5 metadata lines.
+    df = pd.read_csv(filepath, skiprows=5)
+    
+    # Rename dataset columns to align with internal engine variables
     df.columns = ['job_id', 'op_id', 'r', 'p', 'd', 'tool_set', 'size']
-    
-    # Convert dataframes into structural row dictionaries
     jobs_data = df.to_dict(orient='records')
-    print(f"Successfully loaded {len(jobs_data)} scheduling operations.")
+    
+    print(f"\nFile: {os.path.basename(filepath)}")
+    print(f"Loaded {len(jobs_data)} scheduling operations.")
+    print(f"Configuration -> Machines: {num_machines} | Magazine Capacity: {magazine_capacity}")
 
-    # Initialize and execute the engine
-    # Default settings matching KMWE baseline configurations mentioned in the paper:
-    # Setup time = 1 hour, Threshold = 72 hours
+    # Step C: Initialize Heuristic
     heuristic = PractitionerHeuristic(
         jobs_data=jobs_data, 
         num_machines=num_machines, 
@@ -129,23 +142,40 @@ def load_and_run_benchmark(instance_name, num_machines, magazine_capacity=80):
         theta_m=72.0
     )
     
-    print("\n--- Running Phase 1: Initial Tooling Allocation ---")
     sorted_ops = heuristic.phase_1_initial_allocation()
-    
-    print("--- Running Phase 2: Timeline Sequencing ---")
     obj, tardy, setups, schedule = heuristic.phase_2_scheduling(sorted_ops)
     
-    print("\n================ RESULTS SUMMARY ================")
-    print(f"Instance Handled: {instance_name}")
-    print(f"Total Combined Objective Score: {obj:.2f} hours")
-    print(f" -> Accumulated Tardiness Costs: {tardy:.2f} hours")
-    print(f" -> Forced Tool Setup Adjustments: {setups} switches")
-    print("=================================================")
+    print("---------------------------------------------")
+    print(f"Combined Objective Score: {obj:.2f} hours")
+    print(f"Accumulated Tardiness:    {tardy:.2f} hours")
+    print(f"Tool Setup Adjustments:   {setups} switches")
+    print("---------------------------------------------")
     
-    # Let's inspect what Machine 1's queue looks like as a small snapshot
-    print(f"\nSample Pipeline Timeline for Machine 1 (First 5 jobs):")
-    for task in schedule[1][:5]:
-        print(f"  {task['job']} | Window: [{task['start']} -> {task['end']}] | Tardiness: {task['tardiness']} | Tool Switch: {task['tool_switch']}")
+    # Timeline overview for Machine 1
+    if 1 in schedule and schedule[1]:
+        print("Sample timeline (Machine 1 - First 3 jobs):")
+        for task in schedule[1][:3]:
+            print(f"  {task['job']} | Window: [{task['start']} -> {task['end']}] | Tardiness: {task['tardiness']} | Switch: {task['tool_switch']}")
+    print("=============================================\n")
+    return obj, tardy, setups
 
-# Run the 2-Machine 38-Operation benchmark baseline instance
-load_and_run_benchmark(instance_name="2M38_0.5R", num_machines=2, magazine_capacity=80)
+
+# =====================================================================
+# 3. RUNNING EXAMPLES
+# =====================================================================
+if __name__ == "__main__":
+    # Define mapped paths
+    paths = {
+        "Base Case (2M38)": r"2M38\2M38.csv",
+        "Scenario 1 (Tool Ratio)": r"2M38\Scenario1\2M38_0.37R.csv",
+        "Scenario 2 (Capacity)": r"2M38\Scenario2\2M38_53C.csv",
+        "Scenario 3 (Deadline Shift)": r"2M38\Scenario3\2M38_+1D.csv"
+    }
+
+    # Execute all defined cases
+    for name, filepath in paths.items():
+        print(f"Evaluating: {name}")
+        try:
+            load_and_run_local_benchmark(filepath)
+        except Exception as e:
+            print(f"Failed to process case due to: {e}\n")
