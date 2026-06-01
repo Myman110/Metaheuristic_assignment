@@ -1,4 +1,6 @@
 import os
+import glob
+import re
 import pandas as pd
 import random
 
@@ -22,7 +24,6 @@ class PractitionerHeuristic:
         return sum(self.tool_sizes[t] for t in self.T_m[machine])
 
     def phase_1_initial_allocation(self):
-        # Sort operations using the EDD (Earliest Due Date) rule
         O_hat = sorted(self.O, key=lambda x: x['d'])
         
         for op in O_hat:
@@ -41,10 +42,8 @@ class PractitionerHeuristic:
     def phase_2_scheduling(self, O_hat):
         total_tardiness = 0
         total_setups = 0
-        schedule_log = {m: [] for m in self.M}
         
         for op in O_hat:
-            job_id, op_id = op['job_id'], op['op_id']
             t_ij = op['tool_set']
             phi_t = op['size']
             r_ij, p_ij, d_ij = op['r'], op['p'], op['d']
@@ -84,29 +83,43 @@ class PractitionerHeuristic:
             tardiness = max(0.0, end_time - d_ij)
             total_tardiness += tardiness
             
-            schedule_log[m_star].append({
-                'job': f"J{job_id}(Op{op_id})", 
-                'start': round(start_time, 2), 
-                'end': round(end_time, 2), 
-                'tardiness': round(tardiness, 2),
-                'tool_switch': bool(z_ijt)
-            })
-            
         objective_val = (self.wd * total_tardiness) + (self.ws * self.tau * total_setups)
-        return objective_val, total_tardiness, total_setups, schedule_log
+        return objective_val, total_tardiness, total_setups
 
 
 # =====================================================================
-# 2. LOCAL FILE LOADING & EXECUTION
+# 2. FILE DETECTOR & SORTING UTILITIES
 # =====================================================================
-def load_and_run_local_benchmark(filepath):
+def get_scenario_sort_key(filepath):
+    """
+    Extracts the variable numerical value from the filename suffix for logical sorting.
+    e.g., '6M163_-2D.csv' -> splits to '-2D.csv' -> extracts -2.0
+    """
+    basename = os.path.basename(filepath)
+    parts = basename.split('_')
+    if len(parts) >= 2:
+        variable_part = parts[1]
+        # Match signed float or integer
+        match = re.search(r"[-+]?\d*\.\d+|[-+]?\d+", variable_part)
+        if match:
+            return float(match.group())
+    return 0.0
+
+
+def run_heuristic_file(filepath):
+    """
+    Parses a single local CSV case file, reads its metadata, and runs the PH.
+    """
     if not os.path.exists(filepath):
-        raise FileNotFoundError(f"The file path does not exist: {filepath}")
+        return None
 
-    # Step A: Parse metadata rows at the top of the CSV (Lines 1-4)
-    num_machines = 2       # Default fallback
-    magazine_capacity = 80 # Default fallback
+    # Reset seed for consistent evaluation
+    random.seed(42)
+
+    num_machines = 2       
+    magazine_capacity = 80 
     
+    # Try parsing machine and capacity config from metadata headers
     try:
         with open(filepath, 'r') as f:
             for _ in range(5):
@@ -119,21 +132,13 @@ def load_and_run_local_benchmark(filepath):
                         num_machines = int(parts[1])
                     elif parts[0] == 'C':
                         magazine_capacity = int(parts[1])
-    except Exception as e:
-        print(f"Could not parse file metadata: {e}. Proceeding with defaults.")
+    except Exception:
+        pass
 
-    # Step B: Read the operations data. Skip first 5 metadata lines.
     df = pd.read_csv(filepath, skiprows=5)
-    
-    # Rename dataset columns to align with internal engine variables
     df.columns = ['job_id', 'op_id', 'r', 'p', 'd', 'tool_set', 'size']
     jobs_data = df.to_dict(orient='records')
-    
-    print(f"\nFile: {os.path.basename(filepath)}")
-    print(f"Loaded {len(jobs_data)} scheduling operations.")
-    print(f"Configuration -> Machines: {num_machines} | Magazine Capacity: {magazine_capacity}")
 
-    # Step C: Initialize Heuristic
     heuristic = PractitionerHeuristic(
         jobs_data=jobs_data, 
         num_machines=num_machines, 
@@ -143,39 +148,71 @@ def load_and_run_local_benchmark(filepath):
     )
     
     sorted_ops = heuristic.phase_1_initial_allocation()
-    obj, tardy, setups, schedule = heuristic.phase_2_scheduling(sorted_ops)
+    obj, tardy, setups = heuristic.phase_2_scheduling(sorted_ops)
     
-    print("---------------------------------------------")
-    print(f"Combined Objective Score: {obj:.2f} hours")
-    print(f"Accumulated Tardiness:    {tardy:.2f} hours")
-    print(f"Tool Setup Adjustments:   {setups} switches")
-    print("---------------------------------------------")
-    
-    # Timeline overview for Machine 1
-    if 1 in schedule and schedule[1]:
-        print("Sample timeline (Machine 1 - First 3 jobs):")
-        for task in schedule[1][:3]:
-            print(f"  {task['job']} | Window: [{task['start']} -> {task['end']}] | Tardiness: {task['tardiness']} | Switch: {task['tool_switch']}")
-    print("=============================================\n")
-    return obj, tardy, setups
+    # Extract parametric label (e.g. "0.24R")
+    basename = os.path.basename(filepath)
+    param_label = "Base"
+    parts = basename.split('_')
+    if len(parts) >= 2:
+        param_label = parts[1].replace(".csv", "")
 
-
-# =====================================================================
-# 3. RUNNING EXAMPLES
-# =====================================================================
-if __name__ == "__main__":
-    # Define mapped paths
-    paths = {
-        "Base Case (2M38)": r"2M38\2M38.csv",
-        "Scenario 1 (Tool Ratio)": r"2M38\Scenario1\2M38_0.37R.csv",
-        "Scenario 2 (Capacity)": r"2M38\Scenario2\2M38_53C.csv",
-        "Scenario 3 (Deadline Shift)": r"2M38\Scenario3\2M38_+1D.csv"
+    return {
+        "Instance": param_label,
+        "File": basename,
+        "M": num_machines,
+        "C": magazine_capacity,
+        "Objective": round(obj, 2),
+        "Tardiness": round(tardy, 2),
+        "Setups": setups
     }
 
-    # Execute all defined cases
-    for name, filepath in paths.items():
-        print(f"Evaluating: {name}")
-        try:
-            load_and_run_local_benchmark(filepath)
-        except Exception as e:
-            print(f"Failed to process case due to: {e}\n")
+
+# =====================================================================
+# 3. DIRECTORY BATCH RUNNER
+# =====================================================================
+if __name__ == "__main__":
+    # Base path where all problem directories are placed
+    problem_folders = ["2M38", "2M46", "6M140", "6M163"]
+
+    for folder_name in problem_folders:
+        folder_path = folder_name
+        if not os.path.exists(folder_path):
+            print(f"Directory omitted (does not exist): {folder_path}")
+            continue
+            
+        print("=" * 80)
+        print(f" PROCESSING BASE CASE AND SCENARIOS FOR: {folder_name} ".center(80, "#"))
+        print("=" * 80)
+
+        # 1. Run Base Instance
+        base_file_pattern = os.path.join(folder_path, f"{folder_name}.csv")
+        base_files = glob.glob(base_file_pattern)
+        if base_files:
+            print("\n[Base Instance]")
+            base_res = run_heuristic_file(base_files[0])
+            if base_res:
+                print(pd.DataFrame([base_res]).to_string(index=False))
+        
+        # 2. Run Scenarios (Scenario1, Scenario2, Scenario3)
+        for s_idx in [1, 2, 3]:
+            scenario_dir = os.path.join(folder_path, f"Scenario{s_idx}")
+            if not os.path.exists(scenario_dir):
+                continue
+                
+            # Discover and sort scenario CSV files
+            csv_files = glob.glob(os.path.join(scenario_dir, "*.csv"))
+            sorted_files = sorted(csv_files, key=get_scenario_sort_key)
+            
+            results = []
+            for filepath in sorted_files:
+                res = run_heuristic_file(filepath)
+                if res:
+                    results.append(res)
+            
+            if results:
+                print(f"\n[Scenario {s_idx} - {folder_name}]")
+                df_scenario = pd.DataFrame(results)
+                print(df_scenario.to_string(index=False))
+        
+        print("\n" + "=" * 80 + "\n")
