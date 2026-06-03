@@ -63,18 +63,18 @@ class Individual:
 
 
 class Decoder:
-    def __init__(self, ops_by_job, num_machines, magazine_capacity, setup_time=1.0):
+    def __init__(self, ops_by_job, num_machines, magazine_capacity, setup_time=1.0, weights=(1.0, 1.0)):
         self.ops_by_job = ops_by_job
         self.num_machines = num_machines
         self.C = magazine_capacity
         self.tau = setup_time
+        self.w_d, self.w_s = weights
 
     def evaluate(self, individual):
         job_vec = individual.job_vector
         mach_vec = individual.machine_vector
         n = len(job_vec)
         
-        # Step A: Pre-populate magazines with earliest assigned tools (no setup penalty)
         T_m = {m: set() for m in range(1, self.num_machines + 1)}
         mach_tool_sequence = {m: [] for m in range(1, self.num_machines + 1)}
         temp_occ = {}
@@ -182,19 +182,22 @@ class Decoder:
                     T_m[m_id].add(t_ij)
                     total_setups += 1
             
-            prev_finish = job_finish_times.get((j_id, occ - 1), 0.0) if occ > 0 else 0.0
-            start_time = max(r_ij, a_m[m_id], prev_finish)
+            if occ == 0:
+                start_time = max(r_ij, a_m[m_id])
+            else:
+                prev_finish = job_finish_times.get((j_id, occ - 1), 0.0)
+                start_time = max(r_ij, a_m[m_id], prev_finish)
             end_time = start_time + p_ij + (self.tau * z_ijt)
             
             a_m[m_id] = end_time
             job_finish_times[(j_id, occ)] = end_time
             
-            tardiness = max(0.0, end_time - d_ij)
-            total_tardiness += tardiness
+            tardiness_ij = max(0.0, end_time - d_ij)
+            total_tardiness += tardiness_ij
             
         individual.tardiness = total_tardiness
         individual.setups = total_setups
-        individual.fitness = total_tardiness + (self.tau * total_setups)
+        individual.fitness = (self.w_d * total_tardiness) + (self.w_s * self.tau * total_setups)
 
 
 # =====================================================================
@@ -451,7 +454,6 @@ class Matheuristic:
         f_best = min(ind.fitness for ind in population)
         best_ind = min(population, key=lambda x: x.fitness)
         
-        best_improved = False
         q = 1
         
         for generation in range(1, max_generations + 1):
@@ -459,7 +461,7 @@ class Matheuristic:
             while len(offspring) < pop_size:
                 p1, p2 = self.select_parents(population, gamma_1)
                 
-                if best_improved or q <= B:
+                if q <= B:
                     tp1, tp2 = transform_apmx(p1.job_vector, p2.job_vector)
                     tc1, tc2, cx1, cx2 = pmx_crossover(tp1, tp2)
                     c1_job = [p1.job_vector[v - 1] for v in tc1]
@@ -513,10 +515,8 @@ class Matheuristic:
             if current_best.fitness < f_best:
                 f_best = current_best.fitness
                 best_ind = current_best
-                best_improved = True
                 q = 1
             else:
-                best_improved = False
                 q += 1
                 
         return best_ind
