@@ -1,0 +1,1080 @@
+import os
+import random
+import time
+import numpy as np
+import pandas as pd
+
+# Global cache for tool sizes to optimize search speed in the knapsack solver
+GLOBAL_TOOL_SIZES = {}
+
+# =====================================================================
+# Paper-exact parameter settings from Dang et al. (2021)
+# =====================================================================
+PAPER_B = 1
+PAPER_POP_SIZE = 100
+PAPER_ELITISM_RATE = 0.10
+PAPER_UNIFORM_MUTATION_PROB = 0.01
+PAPER_SWAP_MUTATION_PROB = 0.01
+PAPER_TOURNAMENT_RATE = 0.20
+PAPER_NO_IMPROVEMENT_LIMIT = 20
+PAPER_MAX_TIME_SECONDS = 3600.0
+PAPER_SETUP_TIME = 1.0
+PAPER_THETA_M = 72.0
+
+
+# =====================================================================
+# 1. THE EXACT TOOL REPLACEMENT METHOD (TRM) SOLVER
+# =====================================================================
+def solve_trm_ilp_exact(tools_in_magazine, tool_sizes, scores, needed_capacity):
+    """
+    Exact ILP from Dang et al. (2021), Section 5.6, equations (23)-(25).
+
+    Variables:
+        lambda_t = 1 if tool set t is removed, 0 otherwise.
+
+    Model:
+        min  sum_{t in TM_m} sc_t * lambda_t
+        s.t. sum_{t in TM_m} phi_t * lambda_t >= phi_m^S
+             lambda_t in {0,1}
+
+    The magazine only contains a small number of tool sets in practice,
+    so complete enumeration is a transparent exact solver for this tiny ILP.
+    We include deterministic tie-breaks so repeated runs are reproducible
+    for the same random seed.
+    """
+    if needed_capacity <= 0:
+        return []
+
+    tools = sorted(list(tools_in_magazine))
+    n = len(tools)
+    best_key = None
+    best_subset = []
+
+    # Enumerate all non-empty removal subsets. This directly mirrors the
+    # paper's discussion that the number of combinations is 2^|TM_m| - 1.
+    for mask in range(1, 1 << n):
+        subset = [tools[i] for i in range(n) if mask & (1 << i)]
+        freed_capacity = sum(tool_sizes[t] for t in subset)
+        if freed_capacity < needed_capacity:
+            continue
+
+        objective = sum(scores.get(t, 0) for t in subset)
+        # Primary objective: min score. Deterministic tie-breaks: min extra
+        # freed capacity, then fewer removals, then lexicographic subset.
+        key = (objective, freed_capacity, len(subset), tuple(subset))
+        if best_key is None or key < best_key:
+            best_key = key
+            best_subset = subset
+
+    return best_subset
+
+
+# Backward-compatible name used by the decoder.
+def solve_trm_knapsack(tools_in_magazine, tool_sizes, scores, needed_capacity):
+    return solve_trm_ilp_exact(tools_in_magazine, tool_sizes, scores, needed_capacity)
+
+
+# =====================================================================
+# 2. CHROMOSOME INDIVIDUAL AND DECODER
+# =====================================================================
+class Individual:
+    def __init__(self, job_vector, machine_vector):
+        self.job_vector = list(job_vector)
+        self.machine_vector = list(machine_vector)
+        self.fitness = float('inf')
+        self.tardiness = 0.0
+        self.setups = 0
+
+    def get_signature(self):
+        return (tuple(self.job_vector), tuple(self.machine_vector))
+
+
+class Decoder:
+    def __init__(self, ops_by_job, num_machines, magazine_capacity, setup_time=1.0):
+        self.ops_by_job = ops_by_job
+        self.num_machines = num_machines
+        self.C = magazine_capacity
+        self.tau = setup_time
+
+    def evaluate(self, individual):
+        job_vec = individual.job_vector
+        mach_vec = individual.machine_vector
+        n = len(job_vec)
+        
+        # Pre-populate magazines with earliest assigned tools (no setup penalty)
+        T_m = {m: set() for m in range(1, self.num_machines + 1)}
+        mach_tool_sequence = {m: [] for m in range(1, self.num_machines + 1)}
+        temp_occ = {}
+        for g in range(n):
+            j_id = job_vec[g]
+            m_id = mach_vec[g]
+            occ = temp_occ.get(j_id, 0)
+            temp_occ[j_id] = occ + 1
+            op_data = self.ops_by_job[j_id][occ]
+            t_ij = op_data['tool_set']
+            if t_ij not in mach_tool_sequence[m_id]:
+                mach_tool_sequence[m_id].append(t_ij)
+                
+        for m_id in range(1, self.num_machines + 1):
+            current_size = 0
+            for t_ij in mach_tool_sequence[m_id]:
+                phi_t = GLOBAL_TOOL_SIZES[t_ij]
+                if current_size + phi_t <= self.C:
+                    T_m[m_id].add(t_ij)
+                    current_size += phi_t
+                else:
+                    break
+        
+        # Simulation loop
+        a_m = {m: 0.0 for m in range(1, self.num_machines + 1)}
+        job_finish_times = {}
+        total_tardiness = 0.0
+        total_setups = 0
+        occ_counts = {}
+        
+        succeeding_ops_per_machine = {m: [] for m in range(1, self.num_machines + 1)}
+        temp_occ_2 = {}
+        for g in range(n):
+            j_id = job_vec[g]
+            m_id = mach_vec[g]
+            occ = temp_occ_2.get(j_id, 0)
+            temp_occ_2[j_id] = occ + 1
+            op_data = self.ops_by_job[j_id][occ]
+            succeeding_ops_per_machine[m_id].append((op_data['tool_set'], op_data['size']))
+
+        for g in range(n):
+            j_id = job_vec[g]
+            m_id = mach_vec[g]
+            occ = occ_counts.get(j_id, 0)
+            occ_counts[j_id] = occ + 1
+            
+            op_data = self.ops_by_job[j_id][occ]
+            t_ij = op_data['tool_set']
+            phi_t = op_data['size']
+            
+            # --- FIXED LINE HERE ---
+            r_ij, p_ij, d_ij = op_data['r'], op_data['p'], op_data['d']
+            
+            succeeding_ops_per_machine[m_id].pop(0)
+            
+            z_ijt = 0
+            if t_ij not in T_m[m_id]:
+                z_ijt = 1
+                current_size = sum(GLOBAL_TOOL_SIZES[t] for t in T_m[m_id])
+                free_space = self.C - current_size
+                
+                if free_space < phi_t:
+                    needed_space = phi_t - free_space
+                    future_tools = [item[0] for item in succeeding_ops_per_machine[m_id]]
+                    future_unique = []
+                    for ft in future_tools:
+                        if ft in T_m[m_id] and ft not in future_unique:
+                            future_unique.append(ft)
+                            
+                    scores = {}
+                    for ft in T_m[m_id]:
+                        if ft in future_unique:
+                            u = future_unique.index(ft) + 1
+                            scores[ft] = len(future_unique) - (u - 1)
+                        else:
+                            scores[ft] = 0
+                            
+                    zero_score_tools = [t for t in T_m[m_id] if scores[t] == 0]
+                    zero_weight = sum(GLOBAL_TOOL_SIZES[t] for t in zero_score_tools)
+                    
+                    if zero_weight >= needed_space:
+                        # Paper Section 5.6: if score-0 tools can provide enough
+                        # capacity, remove those score-0 tools and skip the ILP.
+                        for t in zero_score_tools:
+                            T_m[m_id].remove(t)
+                    else:
+                        for t in zero_score_tools:
+                            T_m[m_id].remove(t)
+                        remaining_need = needed_space - zero_weight
+                        
+                        active_tools = list(T_m[m_id])
+                        evict_subset = solve_trm_knapsack(
+                            active_tools, GLOBAL_TOOL_SIZES, scores, remaining_need
+                        )
+                        for t in evict_subset:
+                            T_m[m_id].remove(t)
+                            
+                    T_m[m_id].add(t_ij)
+                    total_setups += 1
+                else:
+                    T_m[m_id].add(t_ij)
+                    total_setups += 1
+            
+            prev_finish = job_finish_times.get((j_id, occ - 1), 0.0) if occ > 0 else 0.0
+            start_time = max(r_ij, a_m[m_id], prev_finish)
+            end_time = start_time + p_ij + (self.tau * z_ijt)
+            
+            a_m[m_id] = end_time
+            job_finish_times[(j_id, occ)] = end_time
+            
+            tardiness = max(0.0, end_time - d_ij)
+            total_tardiness += tardiness
+            
+        individual.tardiness = total_tardiness
+        individual.setups = total_setups
+        individual.fitness = total_tardiness + (self.tau * total_setups)
+
+
+# =====================================================================
+# 3. PRACTITIONER HEURISTIC ENGINE
+# =====================================================================
+class PractitionerHeuristic:
+    def __init__(self, jobs_data, num_machines, magazine_capacity, tool_setup_time=PAPER_SETUP_TIME, theta_m=PAPER_THETA_M):
+        self.O = jobs_data
+        self.M = list(range(1, num_machines + 1))
+        self.C = magazine_capacity
+        self.tau = tool_setup_time  
+        self.theta_m = theta_m      
+        self.T_m = {m: set() for m in self.M}       
+        self.a_m = {m: 0.0 for m in self.M}         
+        self.tool_sizes = {op['tool_set']: op['size'] for op in self.O if 'tool_set' in op}
+        
+    def get_magazine_size(self, machine):
+        return sum(self.tool_sizes[t] for t in self.T_m[machine])
+
+    def run(self):
+        O_hat = sorted(self.O, key=lambda x: x['d'])
+        for op in O_hat:
+            t_ij = op['tool_set']
+            phi_t = op['size']
+            m_T = [m for m in self.M if t_ij in self.T_m[m]]
+            if not m_T:
+                M_C = [m for m in self.M if (self.C - self.get_magazine_size(m)) >= phi_t]
+                if M_C:
+                    m_star = min(M_C, key=lambda m: (len(self.T_m[m]), m))
+                    self.T_m[m_star].add(t_ij)
+                    
+        total_tardiness = 0
+        total_setups = 0
+        job_finish_times = {}
+        occ_counts = {}
+        job_vector, machine_vector = [], []
+        
+        for op in O_hat:
+            job_id, op_id = op['job_id'], op['op_id']
+            t_ij, phi_t = op['tool_set'], op['size']
+            r_ij, p_ij, d_ij = op['r'], op['p'], op['d']
+            
+            occ = occ_counts.get(job_id, 0)
+            occ_counts[job_id] = occ + 1
+            
+            m_P = min(self.M, key=lambda m: self.a_m[m])
+            m_T_list = [m for m in self.M if t_ij in self.T_m[m]]
+            m_T = m_T_list[0] if m_T_list else None
+            
+            def calc_xi(machine):
+                prev_finish = job_finish_times.get((job_id, occ - 1), 0.0) if occ > 0 else 0.0
+                return max(r_ij, self.a_m[machine], prev_finish)
+            
+            if m_T is not None:
+                if m_T != m_P and (calc_xi(m_T) - calc_xi(m_P)) >= self.theta_m:
+                    m_star = m_P
+                    z_ijt = 1
+                else:
+                    m_star = m_T
+                    z_ijt = 0
+            else:
+                m_star = m_P
+                z_ijt = 1
+                
+            if z_ijt == 1:
+                phi_s = phi_t - (self.C - self.get_magazine_size(m_star))
+                while phi_s > 0 and self.T_m[m_star]:
+                    removed_tool = random.choice(sorted(self.T_m[m_star]))
+                    self.T_m[m_star].remove(removed_tool)
+                    phi_s = phi_t - (self.C - self.get_magazine_size(m_star))
+                self.T_m[m_star].add(t_ij)
+                total_setups += 1
+            
+            start_time = calc_xi(m_star)
+            end_time = start_time + p_ij + (self.tau * z_ijt)
+            self.a_m[m_star] = end_time
+            job_finish_times[(job_id, occ)] = end_time
+            total_tardiness += max(0.0, end_time - d_ij)
+            
+            job_vector.append(job_id)
+            machine_vector.append(m_star)
+            
+        ind = Individual(job_vector, machine_vector)
+        ind.fitness = total_tardiness + (self.tau * total_setups)
+        return ind
+
+
+
+
+# =====================================================================
+# 4. ALNS WITH ADAPTIVE OPERATOR SELECTION AND TRP
+# =====================================================================
+class ALNS_AOS:
+    """
+    ALNS improvement phase for the PH-generated initial solution.
+
+    Pipeline per candidate:
+        1. Destroy part of the current solution's job/machine vectors.
+        2. Repair the partial vectors into a complete schedule.
+        3. Evaluate with Decoder.evaluate(...), which executes the TRP logic.
+
+    This means TRP remains the exact same replacement subproblem solver used
+    elsewhere in the code; ALNS only searches operation sequence and machine
+    assignment neighborhoods.
+    """
+
+    def __init__(
+        self,
+        jobs_data,
+        num_machines,
+        magazine_capacity,
+        setup_time=PAPER_SETUP_TIME,
+        reaction_factor=0.20,
+        destroy_fraction=(0.03, 0.08),
+        start_temperature=None,
+        cooling_rate=0.995,
+        min_temperature=1e-6,
+        max_insert_positions=12,
+        max_machine_candidates=3,
+        max_removed_jobs=8,
+        cache_evaluations=True,
+    ):
+        self.jobs_data = jobs_data
+        self.num_machines = num_machines
+        self.C = magazine_capacity
+        self.tau = setup_time
+        self.reaction_factor = reaction_factor
+        self.destroy_fraction = destroy_fraction
+        self.temperature = start_temperature
+        self.cooling_rate = cooling_rate
+        self.min_temperature = min_temperature
+        self.max_insert_positions = max_insert_positions
+        self.max_machine_candidates = max_machine_candidates
+        self.max_removed_jobs = max_removed_jobs
+        self.cache_evaluations = cache_evaluations
+        self.eval_cache = {}
+        self.eval_cache_hits = 0
+        self.eval_cache_misses = 0
+
+        self.ops_by_job = {}
+        self.flat_ops = []
+        for op in jobs_data:
+            job_id = int(op['job_id'])
+            self.ops_by_job.setdefault(job_id, []).append(op)
+            self.flat_ops.append(job_id)
+        for job_id in self.ops_by_job:
+            self.ops_by_job[job_id].sort(key=lambda x: x['op_id'])
+
+        self.decoder = Decoder(self.ops_by_job, self.num_machines, self.C, self.tau)
+
+        self.destroy_ops = {
+            "random_removal": self.destroy_random_removal,
+            "worst_due_date_removal": self.destroy_worst_due_date_removal,
+            "machine_overload_removal": self.destroy_machine_overload_removal,
+            "setup_related_removal": self.destroy_setup_related_removal,
+        }
+        self.repair_ops = {
+            "greedy_best_insert": self.repair_greedy_best_insert,
+            "regret2_insert": self.repair_regret2_insert,
+            "edd_insert": self.repair_edd_insert,
+            "least_loaded_insert": self.repair_least_loaded_insert,
+        }
+
+        self.destroy_weights = {name: 1.0 for name in self.destroy_ops}
+        self.repair_weights = {name: 1.0 for name in self.repair_ops}
+
+    # -----------------------------
+    # Basic utilities
+    # -----------------------------
+    def clone(self, ind):
+        new = Individual(ind.job_vector, ind.machine_vector)
+        new.fitness = ind.fitness
+        new.tardiness = ind.tardiness
+        new.setups = ind.setups
+        for attr in ["runtime", "generations", "stop_reason", "history"]:
+            if hasattr(ind, attr):
+                setattr(new, attr, getattr(ind, attr))
+        return new
+
+    def _evaluate(self, job_vec, mach_vec):
+        # Full evaluation is expensive because Decoder.evaluate also solves TRP.
+        # Cache exact schedule evaluations so repeated insertions do not redo TRP.
+        key = (tuple(job_vec), tuple(mach_vec))
+        if self.cache_evaluations and key in self.eval_cache:
+            self.eval_cache_hits += 1
+            cached = self.eval_cache[key]
+            return self.clone(cached)
+
+        ind = Individual(job_vec, mach_vec)
+        self.decoder.evaluate(ind)  # <-- TRP is solved inside this call.
+        if self.cache_evaluations:
+            self.eval_cache_misses += 1
+            self.eval_cache[key] = self.clone(ind)
+        return ind
+
+    def _sample_operator(self, weights):
+        names = list(weights.keys())
+        vals = np.array([max(1e-12, weights[n]) for n in names], dtype=float)
+        probs = vals / vals.sum()
+        return str(np.random.choice(names, p=probs))
+
+    def _update_weight(self, weights, name, reward):
+        rho = self.reaction_factor
+        weights[name] = (1.0 - rho) * weights[name] + rho * reward
+        weights[name] = max(0.05, weights[name])
+
+    def _accept(self, candidate, current):
+        if candidate.fitness <= current.fitness:
+            return True
+        temp = max(self.min_temperature, self.temperature)
+        prob = np.exp(-(candidate.fitness - current.fitness) / temp)
+        return random.random() < prob
+
+    def _num_to_remove(self, n):
+        lo, hi = self.destroy_fraction
+        frac = random.uniform(lo, hi)
+        return max(1, min(n - 1, self.max_removed_jobs, int(round(frac * n))))
+
+    def _remove_positions(self, individual, positions):
+        positions = sorted(set(positions))
+        removed_jobs = [individual.job_vector[i] for i in positions]
+        partial_jobs = [v for i, v in enumerate(individual.job_vector) if i not in positions]
+        partial_machs = [v for i, v in enumerate(individual.machine_vector) if i not in positions]
+        return partial_jobs, partial_machs, removed_jobs
+
+    def _operation_data_for_insertion(self, partial_jobs, job_id):
+        occ = partial_jobs.count(job_id)
+        # The inserted occurrence becomes the next occurrence of this job.
+        # If that occurrence exceeds the job's operation count because later
+        # occurrences were removed first, fall back to the last known operation.
+        occ = min(occ, len(self.ops_by_job[job_id]) - 1)
+        return self.ops_by_job[job_id][occ]
+
+    def _position_candidates(self, partial_jobs, job_id):
+        # Candidate-list ALNS: do not try every insertion position.
+        # Use EDD neighborhood + endpoints + random positions.
+        n = len(partial_jobs)
+        if n + 1 <= self.max_insert_positions:
+            return list(range(n + 1))
+
+        op = self._operation_data_for_insertion(partial_jobs, job_id)
+        due = float(op['d'])
+        occ = {}
+        edd_pos = n
+        for idx, existing_job in enumerate(partial_jobs):
+            k = occ.get(existing_job, 0)
+            occ[existing_job] = k + 1
+            if float(self.ops_by_job[existing_job][k]['d']) > due:
+                edd_pos = idx
+                break
+
+        positions = {0, n, edd_pos}
+        for delta in [-3, -2, -1, 1, 2, 3]:
+            pos = edd_pos + delta
+            if 0 <= pos <= n:
+                positions.add(pos)
+
+        remaining = [i for i in range(n + 1) if i not in positions]
+        budget = max(0, self.max_insert_positions - len(positions))
+        if remaining and budget > 0:
+            positions.update(random.sample(remaining, min(budget, len(remaining))))
+        return sorted(positions)
+
+    def _machine_candidates(self, partial_jobs, partial_machs, job_id):
+        # Candidate-list machines: try machines that are likely promising.
+        op = self._operation_data_for_insertion(partial_jobs, job_id)
+        tool = op['tool_set']
+
+        loads = {m: 0.0 for m in range(1, self.num_machines + 1)}
+        tool_presence = {m: 0 for m in range(1, self.num_machines + 1)}
+        occ = {}
+        for job, mach in zip(partial_jobs, partial_machs):
+            k = occ.get(job, 0)
+            occ[job] = k + 1
+            eop = self.ops_by_job[job][k]
+            loads[mach] += float(eop['p'])
+            if eop['tool_set'] == tool:
+                tool_presence[mach] += 1
+
+        candidates = []
+        # Prefer a machine already using the same tool, if any.
+        same_tool = [m for m, count in tool_presence.items() if count > 0]
+        if same_tool:
+            candidates.append(max(same_tool, key=lambda m: (tool_presence[m], -loads[m])))
+        # Prefer least-loaded machines.
+        for m, _ in sorted(loads.items(), key=lambda kv: kv[1]):
+            if m not in candidates:
+                candidates.append(m)
+            if len(candidates) >= self.max_machine_candidates:
+                break
+        return candidates
+
+    # -----------------------------
+    # Destroy operators
+    # -----------------------------
+    def destroy_random_removal(self, individual, q):
+        positions = random.sample(range(len(individual.job_vector)), q)
+        return self._remove_positions(individual, positions)
+
+    def destroy_worst_due_date_removal(self, individual, q):
+        occ = {}
+        scored = []
+        for idx, job in enumerate(individual.job_vector):
+            k = occ.get(job, 0)
+            occ[job] = k + 1
+            op = self.ops_by_job[job][k]
+            # Priority proxy: urgent operations and long processing times.
+            score = (-float(op['d']), float(op['p']), random.random())
+            scored.append((score, idx))
+        positions = [idx for _, idx in sorted(scored, reverse=True)[:q]]
+        return self._remove_positions(individual, positions)
+
+    def destroy_machine_overload_removal(self, individual, q):
+        loads = {m: 0.0 for m in range(1, self.num_machines + 1)}
+        occ = {}
+        for job, mach in zip(individual.job_vector, individual.machine_vector):
+            k = occ.get(job, 0)
+            occ[job] = k + 1
+            loads[mach] += float(self.ops_by_job[job][k]['p'])
+        overloaded = max(loads, key=loads.get)
+        candidate_positions = [i for i, m in enumerate(individual.machine_vector) if m == overloaded]
+        if len(candidate_positions) < q:
+            extra = [i for i in range(len(individual.job_vector)) if i not in candidate_positions]
+            candidate_positions += random.sample(extra, min(len(extra), q - len(candidate_positions)))
+        positions = random.sample(candidate_positions, q)
+        return self._remove_positions(individual, positions)
+
+    def destroy_setup_related_removal(self, individual, q):
+        occ = {}
+        tools = []
+        for job in individual.job_vector:
+            k = occ.get(job, 0)
+            occ[job] = k + 1
+            tools.append(self.ops_by_job[job][k]['tool_set'])
+
+        setup_positions = []
+        last_tool_by_machine = {}
+        for idx, (mach, tool) in enumerate(zip(individual.machine_vector, tools)):
+            if mach in last_tool_by_machine and last_tool_by_machine[mach] != tool:
+                setup_positions.append(idx)
+            last_tool_by_machine[mach] = tool
+
+        if len(setup_positions) < q:
+            rest = [i for i in range(len(individual.job_vector)) if i not in setup_positions]
+            setup_positions += random.sample(rest, min(len(rest), q - len(setup_positions)))
+        positions = random.sample(setup_positions, q)
+        return self._remove_positions(individual, positions)
+
+    # -----------------------------
+    # Repair operators
+    # -----------------------------
+    def _best_single_insertion(self, partial_jobs, partial_machs, job_id, machine_candidates=None):
+        if machine_candidates is None:
+            machine_candidates = self._machine_candidates(partial_jobs, partial_machs, job_id)
+
+        best = None
+        for pos in self._position_candidates(partial_jobs, job_id):
+            for mach in machine_candidates:
+                trial_jobs = partial_jobs[:pos] + [job_id] + partial_jobs[pos:]
+                trial_machs = partial_machs[:pos] + [mach] + partial_machs[pos:]
+                cand = self._evaluate(trial_jobs, trial_machs)
+                key = (cand.fitness, cand.tardiness, cand.setups, pos, mach)
+                if best is None or key < best[0]:
+                    best = (key, cand)
+        return best[1]
+
+    def repair_greedy_best_insert(self, partial_jobs, partial_machs, removed_jobs):
+        jobs = list(removed_jobs)
+        random.shuffle(jobs)
+        current_jobs, current_machs = list(partial_jobs), list(partial_machs)
+        for job_id in jobs:
+            best = self._best_single_insertion(current_jobs, current_machs, job_id)
+            current_jobs, current_machs = best.job_vector, best.machine_vector
+        return self._evaluate(current_jobs, current_machs)
+
+    def repair_regret2_insert(self, partial_jobs, partial_machs, removed_jobs):
+        remaining = list(removed_jobs)
+        current_jobs, current_machs = list(partial_jobs), list(partial_machs)
+
+        while remaining:
+            best_choice = None
+            for job_id in remaining:
+                candidates = []
+                for pos in self._position_candidates(current_jobs, job_id):
+                    for mach in self._machine_candidates(current_jobs, current_machs, job_id):
+                        trial_jobs = current_jobs[:pos] + [job_id] + current_jobs[pos:]
+                        trial_machs = current_machs[:pos] + [mach] + current_machs[pos:]
+                        cand = self._evaluate(trial_jobs, trial_machs)
+                        candidates.append((cand.fitness, cand))
+                candidates.sort(key=lambda x: x[0])
+                best_fit = candidates[0][0]
+                second_fit = candidates[1][0] if len(candidates) > 1 else best_fit
+                regret = second_fit - best_fit
+                choice_key = (regret, -best_fit, random.random())
+                if best_choice is None or choice_key > best_choice[0]:
+                    best_choice = (choice_key, job_id, candidates[0][1])
+
+            _, chosen_job, chosen_ind = best_choice
+            current_jobs, current_machs = chosen_ind.job_vector, chosen_ind.machine_vector
+            remaining.remove(chosen_job)
+
+        return self._evaluate(current_jobs, current_machs)
+
+    def repair_edd_insert(self, partial_jobs, partial_machs, removed_jobs):
+        jobs = list(removed_jobs)
+        # Sort removed jobs by the due date of their next operation.
+        jobs.sort(key=lambda j: self._operation_data_for_insertion(partial_jobs, j)['d'])
+        current_jobs, current_machs = list(partial_jobs), list(partial_machs)
+        for job_id in jobs:
+            op = self._operation_data_for_insertion(current_jobs, job_id)
+            # Insert near the first operation with a later due date.
+            occ = {}
+            pos = len(current_jobs)
+            for idx, existing_job in enumerate(current_jobs):
+                k = occ.get(existing_job, 0)
+                occ[existing_job] = k + 1
+                if self.ops_by_job[existing_job][k]['d'] > op['d']:
+                    pos = idx
+                    break
+            # Choose the best machine for that EDD position.
+            best = None
+            for mach in range(1, self.num_machines + 1):
+                trial_jobs = current_jobs[:pos] + [job_id] + current_jobs[pos:]
+                trial_machs = current_machs[:pos] + [mach] + current_machs[pos:]
+                cand = self._evaluate(trial_jobs, trial_machs)
+                key = (cand.fitness, cand.tardiness, cand.setups, mach)
+                if best is None or key < best[0]:
+                    best = (key, cand)
+            current_jobs, current_machs = best[1].job_vector, best[1].machine_vector
+        return self._evaluate(current_jobs, current_machs)
+
+    def repair_least_loaded_insert(self, partial_jobs, partial_machs, removed_jobs):
+        current_jobs, current_machs = list(partial_jobs), list(partial_machs)
+        for job_id in removed_jobs:
+            loads = {m: 0.0 for m in range(1, self.num_machines + 1)}
+            occ = {}
+            for job, mach in zip(current_jobs, current_machs):
+                k = occ.get(job, 0)
+                occ[job] = k + 1
+                loads[mach] += float(self.ops_by_job[job][k]['p'])
+            least_loaded = min(loads, key=loads.get)
+            best = self._best_single_insertion(current_jobs, current_machs, job_id, [least_loaded])
+            current_jobs, current_machs = best.job_vector, best.machine_vector
+        return self._evaluate(current_jobs, current_machs)
+
+    # -----------------------------
+    # Main ALNS-AOS loop
+    # -----------------------------
+    def run(
+        self,
+        initial_solution,
+        max_iterations=250,
+        max_time_seconds=60.0,
+        no_improvement_limit=50,
+        record_history=True,
+        verbose=False,
+    ):
+        start_clock = time.time()
+        current = self.clone(initial_solution)
+        self.decoder.evaluate(current)  # Ensure initial solution has TRP-consistent objective.
+        best = self.clone(current)
+
+        if self.temperature is None:
+            self.temperature = max(1.0, 0.05 * abs(current.fitness))
+
+        history = []
+        no_improve = 0
+        stop_reason = "iteration_limit"
+
+        for it in range(1, max_iterations + 1):
+            elapsed = time.time() - start_clock
+            if elapsed >= max_time_seconds:
+                stop_reason = "time_limit"
+                break
+            if no_improve >= no_improvement_limit:
+                stop_reason = "no_improvement_limit"
+                break
+
+            destroy_name = self._sample_operator(self.destroy_weights)
+            repair_name = self._sample_operator(self.repair_weights)
+            q = self._num_to_remove(len(current.job_vector))
+
+            partial_jobs, partial_machs, removed_jobs = self.destroy_ops[destroy_name](current, q)
+            candidate = self.repair_ops[repair_name](partial_jobs, partial_machs, removed_jobs)
+
+            accepted = self._accept(candidate, current)
+            improved_current = candidate.fitness < current.fitness
+            improved_best = candidate.fitness < best.fitness
+
+            if accepted:
+                current = candidate
+
+            if improved_best:
+                best = self.clone(candidate)
+                reward = 10.0
+                no_improve = 0
+            elif accepted and improved_current:
+                reward = 5.0
+                no_improve += 1
+            elif accepted:
+                reward = 1.0
+                no_improve += 1
+            else:
+                reward = 0.1
+                no_improve += 1
+
+            self._update_weight(self.destroy_weights, destroy_name, reward)
+            self._update_weight(self.repair_weights, repair_name, reward)
+            self.temperature = max(self.min_temperature, self.temperature * self.cooling_rate)
+
+            if record_history:
+                history.append({
+                    "iteration": it,
+                    "runtime": float(time.time() - start_clock),
+                    "best_fitness": float(best.fitness),
+                    "current_fitness": float(current.fitness),
+                    "candidate_fitness": float(candidate.fitness),
+                    "accepted": bool(accepted),
+                    "improved_best": bool(improved_best),
+                    "destroy": destroy_name,
+                    "repair": repair_name,
+                    "q_removed": int(q),
+                    "temperature": float(self.temperature),
+                    "no_improve": int(no_improve),
+                    "eval_cache_hits": int(self.eval_cache_hits),
+                    "eval_cache_misses": int(self.eval_cache_misses),
+                })
+
+            if verbose and (it == 1 or it % 25 == 0 or improved_best):
+                print(
+                    f"alns_it={it:5d} best={best.fitness:.4f} "
+                    f"current={current.fitness:.4f} cand={candidate.fitness:.4f} "
+                    f"acc={accepted} d={destroy_name} r={repair_name} "
+                    f"temp={self.temperature:.4f}"
+                )
+
+        best.alns_iterations = len(history) if record_history else it
+        best.alns_runtime = time.time() - start_clock
+        best.alns_stop_reason = stop_reason
+        best.alns_history = history
+        best.alns_destroy_weights = dict(self.destroy_weights)
+        best.alns_repair_weights = dict(self.repair_weights)
+        best.alns_eval_cache_hits = self.eval_cache_hits
+        best.alns_eval_cache_misses = self.eval_cache_misses
+        return best
+
+
+
+
+# =====================================================================
+# REAL-WORLD DATA LOADER & PARSER
+# =====================================================================
+def load_actual_kmwe_instance(filepath):
+    """
+    Parses the genuine KMWE data files by extracting metadata from the 
+    5-line header and properly building structured dictionaries.
+    """
+    num_machines = 2
+    magazine_capacity = 80
+    
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(
+            f"KMWE CSV file not found: {filepath}. Synthetic/mock data is disabled."
+        )
+
+    # 1. Extract metadata from the 5-line header
+    with open(filepath, 'r') as f:
+        for _ in range(5):
+            line = f.readline().strip()
+            if not line:
+                continue
+            parts = line.split(',')
+            if len(parts) >= 2:
+                key = parts[0].strip()
+                value = parts[1].strip()
+                if key == 'M':
+                    num_machines = int(value)
+                elif key == 'C':
+                    magazine_capacity = int(value)
+
+    # 2. Read the structured operations block
+    df = pd.read_csv(filepath, skiprows=5)
+    expected_columns = ['job_id', 'op_id', 'r', 'p', 'd', 'tool_set', 'size']
+    if len(df.columns) != len(expected_columns):
+        raise ValueError(
+            f"Unexpected KMWE CSV format in {filepath}. "
+            f"Expected {len(expected_columns)} operation columns after the 5-line header."
+        )
+    df.columns = expected_columns
+
+    for col in expected_columns:
+        df[col] = pd.to_numeric(df[col], errors='raise')
+
+    jobs_data = df.to_dict(orient='records')
+
+    # 3. Cache tool dimensions for the TRM solver. Clear first to avoid
+    # cross-case contamination when running multiple KMWE cases in one session.
+    GLOBAL_TOOL_SIZES.clear()
+    for op in jobs_data:
+        GLOBAL_TOOL_SIZES[op['tool_set']] = op['size']
+
+    return jobs_data, num_machines, magazine_capacity
+
+
+def resolve_kmwe_case_file(case_name):
+    """
+    Resolve a real KMWE case CSV. Synthetic fallback is deliberately disabled.
+    Accepted layouts:
+        <case_name>/<case_name>.csv
+        <case_name>/Base <case_name>.csv
+        <case_name>.csv
+    """
+    possible_paths = [
+        os.path.join(case_name, f"{case_name}.csv"),
+        os.path.join(case_name, f"Base {case_name}.csv"),
+        f"{case_name}.csv",
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(
+        f"Required real KMWE CSV for {case_name!r} was not found. "
+        f"Checked: {possible_paths}. Synthetic/mock data is disabled."
+    )
+
+
+
+
+
+# =====================================================================
+# ALNS-ONLY EXPERIMENT ENGINE
+# =====================================================================
+def run_alns_only_on_file(
+    case_file,
+    seed=0,
+    alns_time_seconds=300.0,
+    alns_iterations=1000,
+    alns_no_improvement_limit=200,
+    verbose=False,
+):
+    """
+    Run ALNS-AOS+TRP only, initialized by the Practitioner Heuristic.
+    No GA/MH phase is executed.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+    jobs_data, m_case, c_case = load_actual_kmwe_instance(case_file)
+
+    t0 = time.time()
+    ph_engine = PractitionerHeuristic(jobs_data, num_machines=m_case, magazine_capacity=c_case)
+    ph_solution = ph_engine.run()
+    ph_runtime = time.time() - t0
+
+    ops_by_job = {}
+    for op in jobs_data:
+        job_id = int(op["job_id"])
+        ops_by_job.setdefault(job_id, []).append(op)
+    for job_id in ops_by_job:
+        ops_by_job[job_id].sort(key=lambda x: x["op_id"])
+
+    decoder = Decoder(ops_by_job, m_case, c_case, PAPER_SETUP_TIME)
+    decoder.evaluate(ph_solution)
+
+    alns_engine = ALNS_AOS(jobs_data, m_case, c_case, PAPER_SETUP_TIME)
+    alns_solution = alns_engine.run(
+        ph_solution,
+        max_time_seconds=alns_time_seconds,
+        max_iterations=alns_iterations,
+        no_improvement_limit=alns_no_improvement_limit,
+        record_history=True,
+        verbose=verbose,
+    )
+
+    decoder.evaluate(alns_solution)
+
+    result = {
+        "case_file": case_file,
+        "seed": seed,
+        "PH_fitness": ph_solution.fitness,
+        "PH_tardiness": ph_solution.tardiness,
+        "PH_setups": ph_solution.setups,
+        "PH_runtime": ph_runtime,
+        "ALNS_fitness": alns_solution.fitness,
+        "ALNS_tardiness": alns_solution.tardiness,
+        "ALNS_setups": alns_solution.setups,
+        "ALNS_runtime": alns_solution.alns_runtime,
+        "ALNS_iterations": alns_solution.alns_iterations,
+        "ALNS_stop": alns_solution.alns_stop_reason,
+        "ALNS_cache_hits": getattr(alns_solution, "alns_eval_cache_hits", None),
+        "ALNS_cache_misses": getattr(alns_solution, "alns_eval_cache_misses", None),
+        "Improvement_vs_PH_%": ((alns_solution.fitness - ph_solution.fitness) / max(1.0, ph_solution.fitness)) * 100.0,
+    }
+
+    print(pd.DataFrame([result]).to_string(index=False))
+    return alns_solution, result
+
+
+
+def run_alns_table8_replications(
+    num_runs=10,
+    alns_time_seconds=300.0,
+    alns_iterations=1000,
+    alns_no_improvement_limit=200,
+):
+    """
+    Build a Table 8-style ALNS-only experiment on the real 6M140 KMWE case.
+
+    The 6M140 operations are sorted by release time and sliced to:
+        n = 15, 25, 30, 60, 90, 120, 140
+
+    PH   = Practitioner Heuristic initial solution
+    ALNS = ALNS-AOS+TRP initialized from PH
+
+    Synthetic/mock data is disabled.
+    """
+    print("\n" + "=" * 120)
+    print(f" REAL KMWE TABLE 8 ALNS-ONLY: 6M140 SLICES ({num_runs} SEED SAMPLES) ".center(120, "#"))
+    print("=" * 120)
+
+    case_file = resolve_kmwe_case_file("6M140")
+    full_jobs_data, m_val, c_val = load_actual_kmwe_instance(case_file)
+    df_base = pd.DataFrame(full_jobs_data)
+    df_sorted = df_base.sort_values(by="r").copy()
+
+    rows = []
+
+    for n_slice in [15, 25, 30, 60, 90, 120, 140]:
+        sliced_ops = df_sorted.head(n_slice).to_dict(orient="records")
+        records = []
+
+        for seed in range(num_runs):
+            random.seed(seed)
+            np.random.seed(seed)
+
+            # Rebuild tool size cache for this slice.
+            GLOBAL_TOOL_SIZES.clear()
+            for op in sliced_ops:
+                GLOBAL_TOOL_SIZES[op["tool_set"]] = op["size"]
+
+            t0 = time.time()
+            ph_engine = PractitionerHeuristic(sliced_ops, num_machines=m_val, magazine_capacity=c_val)
+            ph_solution = ph_engine.run()
+            ph_runtime = time.time() - t0
+
+            ops_by_job = {}
+            for op in sliced_ops:
+                job_id = int(op["job_id"])
+                ops_by_job.setdefault(job_id, []).append(op)
+            for job_id in ops_by_job:
+                ops_by_job[job_id].sort(key=lambda x: x["op_id"])
+
+            decoder = Decoder(ops_by_job, m_val, c_val, PAPER_SETUP_TIME)
+            decoder.evaluate(ph_solution)
+
+            alns_engine = ALNS_AOS(sliced_ops, m_val, c_val, PAPER_SETUP_TIME)
+            alns_solution = alns_engine.run(
+                ph_solution,
+                max_time_seconds=alns_time_seconds,
+                max_iterations=alns_iterations,
+                no_improvement_limit=alns_no_improvement_limit,
+                record_history=True,
+                verbose=False,
+            )
+            decoder.evaluate(alns_solution)
+
+            records.append({
+                "PH_fitness": ph_solution.fitness,
+                "PH_runtime": ph_runtime,
+                "ALNS_fitness": alns_solution.fitness,
+                "ALNS_runtime": alns_solution.alns_runtime,
+                "ALNS_iterations": alns_solution.alns_iterations,
+                "ALNS_stop": alns_solution.alns_stop_reason,
+            })
+
+        ph = np.array([r["PH_fitness"] for r in records], dtype=float)
+        alns = np.array([r["ALNS_fitness"] for r in records], dtype=float)
+
+        rows.append({
+            "n": n_slice,
+            "PH_μ": round(float(np.mean(ph)), 2),
+            "PH_σ": round(float(np.std(ph)), 2),
+            "PH_C.T.(s)": round(float(np.mean([r["PH_runtime"] for r in records])), 3),
+            "ALNS_μ": round(float(np.mean(alns)), 2),
+            "ALNS_σ": round(float(np.std(alns)), 2),
+            "ALNS_C.T.(s)": round(float(np.mean([r["ALNS_runtime"] for r in records])), 3),
+            "ALNS_it_μ": round(float(np.mean([r["ALNS_iterations"] for r in records])), 1),
+            "Gap_ALNS_vs_PH (%)": f"{((np.mean(alns) - np.mean(ph)) / max(1.0, np.mean(ph))) * 100.0:.2f}%",
+            "ALNS_StopReasons": ",".join(sorted(set(r["ALNS_stop"] for r in records))),
+        })
+
+    summary = pd.DataFrame(rows)
+    print("\n[ALNS-ONLY TABLE 8 SUMMARY: REAL 6M140 SLICES]")
+    print(summary.to_string(index=False))
+    return summary
+
+
+def run_alns_only_replications(
+    num_runs=10,
+    alns_time_seconds=300.0,
+    alns_iterations=1000,
+    alns_no_improvement_limit=200,
+):
+    """
+    Run ALNS-only experiments on real KMWE cases.
+
+    PH   = Practitioner Heuristic initial solution
+    ALNS = ALNS-AOS+TRP initialized from PH
+
+    Synthetic/mock data is disabled.
+    """
+    print("=" * 120)
+    print(f" REAL KMWE LONG-EXPLORATION ALNS-ONLY ENGINE: PH vs ALNS-AOS+TRP ({num_runs} SEED SAMPLES) ".center(120, "#"))
+    print("=" * 120)
+
+    rows = []
+
+    for case_name in ["2M38", "2M46", "6M140", "6M163"]:
+        case_file = resolve_kmwe_case_file(case_name)
+        records = []
+
+        for seed in range(num_runs):
+            _, result = run_alns_only_on_file(
+                case_file,
+                seed=seed,
+                alns_time_seconds=alns_time_seconds,
+                alns_iterations=alns_iterations,
+                alns_no_improvement_limit=alns_no_improvement_limit,
+                verbose=False,
+            )
+            records.append(result)
+
+        ph = np.array([r["PH_fitness"] for r in records], dtype=float)
+        alns = np.array([r["ALNS_fitness"] for r in records], dtype=float)
+
+        rows.append({
+            "BaseCase": case_name,
+            "PH_μ": round(float(np.mean(ph)), 2),
+            "PH_σ": round(float(np.std(ph)), 2),
+            "PH_C.T.(s)": round(float(np.mean([r["PH_runtime"] for r in records])), 3),
+            "ALNS_μ": round(float(np.mean(alns)), 2),
+            "ALNS_σ": round(float(np.std(alns)), 2),
+            "ALNS_C.T.(s)": round(float(np.mean([r["ALNS_runtime"] for r in records])), 3),
+            "ALNS_it_μ": round(float(np.mean([r["ALNS_iterations"] for r in records])), 1),
+            "Gap_ALNS_vs_PH (%)": f"{((np.mean(alns) - np.mean(ph)) / max(1.0, np.mean(ph))) * 100.0:.2f}%",
+            "ALNS_StopReasons": ",".join(sorted(set(r["ALNS_stop"] for r in records))),
+        })
+
+    summary = pd.DataFrame(rows)
+    print("\n[ALNS-ONLY SUMMARY: REAL KMWE BASE CASES]")
+    print(summary.to_string(index=False))
+    return summary
+
+
+if __name__ == "__main__":
+    # Longer ALNS+AOS exploration defaults:
+    #   300 seconds, 1000 iterations, 200 no-improvement iterations.
+    # This gives AOS more time to adapt operator weights.
+    run_alns_table8_replications(num_runs=10)
+    run_alns_only_replications(num_runs=10)
