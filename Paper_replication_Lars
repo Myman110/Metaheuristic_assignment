@@ -729,6 +729,7 @@ def run_exact_paper_replications(num_runs=20):
         
         for run_seed in range(num_runs):
             random.seed(run_seed)
+            np.random.seed(run_seed)
             
             # PH Baseline Model
             t0 = time.time()
@@ -794,6 +795,7 @@ def run_exact_paper_replications(num_runs=20):
         
         for run_seed in range(num_runs):
             random.seed(run_seed)
+            np.random.seed(run_seed)
             
             # PH Optimization Run
             t0 = time.time()
@@ -853,6 +855,7 @@ def run_no_premature_stop_check(
         ("extended_stop_check", extended_no_improvement_limit),
     ]:
         random.seed(seed)
+        np.random.seed(seed)
         mh_eng = Matheuristic(case_ops, num_machines=m_case, magazine_capacity=c_case)
         res = mh_eng.run(
             max_time_seconds=max_time_seconds,
