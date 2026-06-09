@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import random
 import time
@@ -9,7 +10,6 @@ from tqdm import tqdm
 # =====================================================================
 # UTILITY
 # =====================================================================
-
 def compute_arpd(values, best_known):
     """
     Average Relative Percentage Deviation.
@@ -20,14 +20,11 @@ def compute_arpd(values, best_known):
         return 0.0
     return float(np.mean([(v - best_known) / best_known * 100.0 for v in values]))
 
-
-# =====================================================================
-# GLOBAL TOOL-SIZE CACHE
-# =====================================================================
+# Global cache for tool sizes to optimize search speed in the knapsack solver
 GLOBAL_TOOL_SIZES = {}
 
 # =====================================================================
-# PAPER-EXACT PARAMETERS  (Dang et al. 2021)
+# Paper-exact parameter settings from Dang et al. (2021)
 # =====================================================================
 PAPER_B                    = 1
 PAPER_POP_SIZE             = 100
@@ -44,7 +41,6 @@ PAPER_THETA_M              = 72.0
 # =====================================================================
 # 1. TOOL REPLACEMENT METHOD  (TRM) — exact enumeration ILP
 # =====================================================================
-
 def solve_trm_ilp_exact(tools_in_magazine, tool_sizes, scores, needed_capacity):
     """
     Exact solver for the ILP in Dang et al. (2021) Section 5.6, eqs (23)-(25).
@@ -86,7 +82,6 @@ def solve_trm_knapsack(tools_in_magazine, tool_sizes, scores, needed_capacity):
 # =====================================================================
 # 2. SOLUTION REPRESENTATION
 # =====================================================================
-
 class Individual:
     def __init__(self, job_vector, machine_vector):
         self.job_vector     = list(job_vector)
@@ -102,7 +97,6 @@ class Individual:
 # =====================================================================
 # 3. DECODER  (schedule evaluator + TRM)
 # =====================================================================
-
 class Decoder:
     def __init__(self, ops_by_job, num_machines, magazine_capacity, setup_time=1.0):
         self.ops_by_job   = ops_by_job
@@ -224,7 +218,6 @@ class Decoder:
 # =====================================================================
 # 4. PRACTITIONER HEURISTIC  (paper Section 6)
 # =====================================================================
-
 class PractitionerHeuristic:
     def __init__(self, jobs_data, num_machines, magazine_capacity,
                  tool_setup_time=PAPER_SETUP_TIME, theta_m=PAPER_THETA_M):
@@ -315,7 +308,6 @@ class PractitionerHeuristic:
 # =====================================================================
 # 5. Q-LEARNING OPERATOR SELECTOR
 # =====================================================================
-
 class QLearningSelector:
     """
     Tabular Q-learning for adaptive operator selection in ALNS.
@@ -426,7 +418,6 @@ class QLearningSelector:
 # =====================================================================
 # 6. ALNS WITH Q-LEARNING OPERATOR SELECTION  (ALNS-QL)
 # =====================================================================
-
 class ALNS_QL:
     """
     Adaptive Large Neighborhood Search with Q-Learning operator selection.
@@ -454,7 +445,7 @@ class ALNS_QL:
         num_machines,
         magazine_capacity,
         setup_time      = PAPER_SETUP_TIME,
-        destroy_fraction = (0.10, 0.25),
+        destroy_fraction = (0.03, 0.08),  # OPTIMIZED: Much faster local search neighborhood
         start_temperature = None,
         cooling_rate    = 0.995,
         min_temperature = 1e-6,
@@ -539,7 +530,6 @@ class ALNS_QL:
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
-
     def clone(self, ind):
         new = Individual(ind.job_vector, ind.machine_vector)
         new.fitness   = ind.fitness
@@ -571,7 +561,8 @@ class ALNS_QL:
     def _num_to_remove(self, n):
         lo, hi = self.destroy_fraction
         frac   = random.uniform(lo, hi)
-        return max(1, min(n - 1, int(round(frac * n))))
+        # OPTIMIZED: Cap removed jobs to 8 max to speed up repair phases
+        return max(1, min(n - 1, 8, int(round(frac * n))))
 
     def _remove_positions(self, individual, positions):
         positions    = sorted(set(positions))
@@ -637,7 +628,6 @@ class ALNS_QL:
     # ------------------------------------------------------------------
     # Destroy operators
     # ------------------------------------------------------------------
-
     def destroy_random_removal(self, individual, q):
         positions = random.sample(range(len(individual.job_vector)), q)
         return self._remove_positions(individual, positions)
@@ -691,7 +681,6 @@ class ALNS_QL:
     # ------------------------------------------------------------------
     # Repair operators
     # ------------------------------------------------------------------
-
     def _best_single_insertion(self, partial_jobs, partial_machs, job_id,
                                 machine_candidates=None):
         if machine_candidates is None:
@@ -784,7 +773,6 @@ class ALNS_QL:
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
-
     def run(
         self,
         initial_solution,
@@ -803,8 +791,8 @@ class ALNS_QL:
         if self.temperature is None:
             self.temperature = max(1.0, 0.50 * abs(current.fitness))
 
-        # Set Q-learning epsilon decay horizon to first half of iteration budget
-        self.ql.epsilon_decay_steps = max_iterations // 2
+        # OPTIMIZED: Cap epsilon decay steps to 150 to ensure exploration/exploitation transition occurs
+        self.ql.epsilon_decay_steps = min(max_iterations // 2, 150)
 
         history     = []
         no_improve  = 0
@@ -846,8 +834,8 @@ class ALNS_QL:
                 no_improve += 1
 
             # --- Q-learning: compute reward and update ---
-            # Bereken de reward op basis van de opgeslagen oude fitness
-            reward = previous_fitness - candidate.fitness
+            # OPTIMIZED: Relative rewards based on percentage improvement
+            reward = ((previous_fitness - candidate.fitness) / max(1.0, previous_fitness)) * 100.0
             
             self.ql.update(state, d_idx, r_idx, reward, current.fitness, best.fitness)
             self.ql.decay_epsilon(max_iterations)
@@ -899,7 +887,6 @@ class ALNS_QL:
 # =====================================================================
 # 7. DATA LOADER
 # =====================================================================
-
 def load_actual_kmwe_instance(filepath):
     """
     Parse a real KMWE CSV file.
@@ -955,7 +942,6 @@ def resolve_kmwe_case_file(case_name):
 # =====================================================================
 # 8. SINGLE-RUN HELPER
 # =====================================================================
-
 def run_alns_ql_on_file(
     case_file,
     seed                  = 0,
@@ -1021,12 +1007,11 @@ def run_alns_ql_on_file(
 # =====================================================================
 # 9. TABLE 8 EXPERIMENT  (6M140 slices)
 # =====================================================================
-
 def run_alns_ql_table8_replications(
     num_runs              = 10,
-    alns_time_seconds     = 60.0,
-    alns_iterations       = 2000,
-    alns_no_improvement_limit = 300,
+    alns_time_seconds     = 300.0,            # OPTIMIZED: Extended time limit for complete exploration
+    alns_iterations       = 1000,            # OPTIMIZED: Balanced iteration budget
+    alns_no_improvement_limit = 200,          # OPTIMIZED: Balanced stagnation check
 ):
     """
     Table 8-style experiment: 6M140 sliced at n = 15,25,30,60,90,120,140.
@@ -1129,12 +1114,11 @@ def run_alns_ql_table8_replications(
 # =====================================================================
 # 10. TABLE 14 EXPERIMENT  (base cases)
 # =====================================================================
-
 def run_alns_ql_base_case_replications(
     num_runs              = 10,
-    alns_time_seconds     = 60.0,
-    alns_iterations       = 2000,
-    alns_no_improvement_limit = 300,
+    alns_time_seconds     = 300.0,            # OPTIMIZED: Extended time limit for complete exploration
+    alns_iterations       = 1000,            # OPTIMIZED: Balanced iteration budget
+    alns_no_improvement_limit = 200,          # OPTIMIZED: Balanced stagnation check
 ):
     """
     Table 14-style experiment: all four KMWE base cases.
@@ -1232,7 +1216,6 @@ def run_alns_ql_base_case_replications(
 # =====================================================================
 # ENTRY POINT
 # =====================================================================
-
 if __name__ == "__main__":
     run_alns_ql_table8_replications(num_runs=10)
     run_alns_ql_base_case_replications(num_runs=10)
