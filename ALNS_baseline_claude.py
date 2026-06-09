@@ -3,6 +3,17 @@ import random
 import time
 import numpy as np
 import pandas as pd
+from scipy import stats
+
+def compute_arpd(values, best_known):
+    """
+    Average Relative Percentage Deviation.
+    ARPD = mean( (value - best_known) / best_known * 100 )
+    If best_known is 0, returns 0 to avoid division by zero.
+    """
+    if best_known <= 0:
+        return 0.0
+    return float(np.mean([(v - best_known) / best_known * 100.0 for v in values]))
 
 # Global cache for tool sizes to optimize search speed in the knapsack solver
 GLOBAL_TOOL_SIZES = {}
@@ -331,13 +342,13 @@ class ALNS_AOS:
         magazine_capacity,
         setup_time=PAPER_SETUP_TIME,
         reaction_factor=0.20,
-        destroy_fraction=(0.03, 0.08),
+        destroy_fraction=(0.1, 0.25),
         start_temperature=None,
         cooling_rate=0.995,
         min_temperature=1e-6,
         max_insert_positions=12,
         max_machine_candidates=3,
-        max_removed_jobs=8,
+        max_removed_jobs=999,
         cache_evaluations=True,
     ):
         self.jobs_data = jobs_data
@@ -611,7 +622,7 @@ class ALNS_AOS:
                 best_fit = candidates[0][0]
                 second_fit = candidates[1][0] if len(candidates) > 1 else best_fit
                 regret = second_fit - best_fit
-                choice_key = (regret, -best_fit, random.random())
+                choice_key = (regret, best_fit, random.random())
                 if best_choice is None or choice_key > best_choice[0]:
                     best_choice = (choice_key, job_id, candidates[0][1])
 
@@ -681,7 +692,7 @@ class ALNS_AOS:
         best = self.clone(current)
 
         if self.temperature is None:
-            self.temperature = max(1.0, 0.05 * abs(current.fitness))
+            self.temperature = max(1.0, 0.50 * abs(current.fitness))
 
         history = []
         no_improve = 0
@@ -919,9 +930,9 @@ def run_alns_only_on_file(
 
 def run_alns_table8_replications(
     num_runs=10,
-    alns_time_seconds=300.0,
-    alns_iterations=1000,
-    alns_no_improvement_limit=200,
+    alns_time_seconds=60.0,
+    alns_iterations=2000,
+    alns_no_improvement_limit=300,
 ):
     """
     Build a Table 8-style ALNS-only experiment on the real 6M140 KMWE case.
@@ -996,13 +1007,16 @@ def run_alns_table8_replications(
         ph = np.array([r["PH_fitness"] for r in records], dtype=float)
         alns = np.array([r["ALNS_fitness"] for r in records], dtype=float)
 
+        best_known = float(min(np.min(ph), np.min(alns)))
         rows.append({
             "n": n_slice,
             "PH_μ": round(float(np.mean(ph)), 2),
             "PH_σ": round(float(np.std(ph)), 2),
+            "PH_ARPD": round(compute_arpd(ph, best_known), 2),
             "PH_C.T.(s)": round(float(np.mean([r["PH_runtime"] for r in records])), 3),
             "ALNS_μ": round(float(np.mean(alns)), 2),
             "ALNS_σ": round(float(np.std(alns)), 2),
+            "ALNS_ARPD": round(compute_arpd(alns, best_known), 2),
             "ALNS_C.T.(s)": round(float(np.mean([r["ALNS_runtime"] for r in records])), 3),
             "ALNS_it_μ": round(float(np.mean([r["ALNS_iterations"] for r in records])), 1),
             "Gap_ALNS_vs_PH (%)": f"{((np.mean(alns) - np.mean(ph)) / max(1.0, np.mean(ph))) * 100.0:.2f}%",
@@ -1017,9 +1031,9 @@ def run_alns_table8_replications(
 
 def run_alns_only_replications(
     num_runs=10,
-    alns_time_seconds=300.0,
-    alns_iterations=1000,
-    alns_no_improvement_limit=200,
+    alns_time_seconds=60.0,
+    alns_iterations=2000,
+    alns_no_improvement_limit=300,
 ):
     """
     Run ALNS-only experiments on real KMWE cases.
@@ -1053,19 +1067,22 @@ def run_alns_only_replications(
         ph = np.array([r["PH_fitness"] for r in records], dtype=float)
         alns = np.array([r["ALNS_fitness"] for r in records], dtype=float)
 
+        best_known = float(min(np.min(ph), np.min(alns)))
         rows.append({
             "BaseCase": case_name,
             "PH_μ": round(float(np.mean(ph)), 2),
             "PH_σ": round(float(np.std(ph)), 2),
+            "PH_ARPD": round(compute_arpd(ph, best_known), 2),
             "PH_C.T.(s)": round(float(np.mean([r["PH_runtime"] for r in records])), 3),
             "ALNS_μ": round(float(np.mean(alns)), 2),
             "ALNS_σ": round(float(np.std(alns)), 2),
+            "ALNS_ARPD": round(compute_arpd(alns, best_known), 2),
             "ALNS_C.T.(s)": round(float(np.mean([r["ALNS_runtime"] for r in records])), 3),
             "ALNS_it_μ": round(float(np.mean([r["ALNS_iterations"] for r in records])), 1),
             "Gap_ALNS_vs_PH (%)": f"{((np.mean(alns) - np.mean(ph)) / max(1.0, np.mean(ph))) * 100.0:.2f}%",
             "ALNS_StopReasons": ",".join(sorted(set(r["ALNS_stop"] for r in records))),
         })
-
+    
     summary = pd.DataFrame(rows)
     print("\n[ALNS-ONLY SUMMARY: REAL KMWE BASE CASES]")
     print(summary.to_string(index=False))
