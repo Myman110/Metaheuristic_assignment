@@ -2528,7 +2528,7 @@ if __name__ == "__main__":
     run_exact_hybrid_replications(
         num_runs=10,
         mh_time_seconds=3600.0,
-        mh_no_improvement_limit=20,
+        mh_no_improvement_limit=100,
         alns_time_seconds=300.0,
         alns_iterations=1000,
         alns_no_improvement_limit=200,
