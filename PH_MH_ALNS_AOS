@@ -4,6 +4,18 @@ import time
 import numpy as np
 import pandas as pd
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # Fallback so the script still runs if tqdm is not installed.
+    def tqdm(iterable=None, *args, **kwargs):
+        if iterable is None:
+            class _DummyTqdm:
+                def update(self, *a, **k): pass
+                def set_postfix(self, *a, **k): pass
+                def close(self): pass
+            return _DummyTqdm()
+        return iterable
+
 # Global cache for tool sizes to optimize search speed in the knapsack solver
 GLOBAL_TOOL_SIZES = {}
 
@@ -795,6 +807,8 @@ class ALNS_AOS:
         no_improvement_limit=50,
         record_history=True,
         verbose=False,
+        show_progress=False,
+        progress_desc="ALNS-AOS",
     ):
         start_clock = time.time()
         current = self.clone(initial_solution)
@@ -808,7 +822,14 @@ class ALNS_AOS:
         no_improve = 0
         stop_reason = "iteration_limit"
 
-        for it in range(1, max_iterations + 1):
+        iterator = tqdm(
+            range(1, max_iterations + 1),
+            desc=progress_desc,
+            leave=False,
+            disable=not show_progress,
+        )
+
+        for it in iterator:
             self.current_iteration = it
             elapsed = time.time() - start_clock
 
@@ -844,6 +865,14 @@ class ALNS_AOS:
             self._update_weight(self.destroy_weights, destroy_name, reward)
             self._update_weight(self.repair_weights, repair_name, reward)
             self.temperature = max(self.min_temperature, self.temperature * self.cooling_rate)
+
+            if show_progress and (it == 1 or it % 10 == 0 or improved_best):
+                iterator.set_postfix(
+                    best=round(float(best.fitness), 2),
+                    curr=round(float(current.fitness), 2),
+                    noimp=int(no_improve),
+                    temp=round(float(self.temperature), 3),
+                )
 
             if record_history:
                 history.append({
@@ -978,8 +1007,9 @@ def run_alns_only_on_file(
     seed=0,
     alns_time_seconds=300.0,
     alns_iterations=1000,
-    alns_no_improvement_limit=250,
+    alns_no_improvement_limit=200,
     verbose=False,
+    show_progress=False,
 ):
     """
     Run ALNS-AOS+TRP only, initialized by the Practitioner Heuristic.
@@ -1013,6 +1043,8 @@ def run_alns_only_on_file(
         no_improvement_limit=alns_no_improvement_limit,
         record_history=True,
         verbose=verbose,
+        show_progress=show_progress,
+        progress_desc=f"GA/MH seed={seed}",
     )
 
     decoder.evaluate(alns_solution)
@@ -1044,7 +1076,7 @@ def run_alns_table8_replications(
     num_runs=10,
     alns_time_seconds=300.0,
     alns_iterations=1000,
-    alns_no_improvement_limit=250,
+    alns_no_improvement_limit=200,
 ):
     """
     Build a Table 8-style ALNS-only experiment on the real 6M140 KMWE case.
@@ -1142,7 +1174,7 @@ def run_alns_only_replications(
     num_runs=10,
     alns_time_seconds=300.0,
     alns_iterations=1000,
-    alns_no_improvement_limit=250,
+    alns_no_improvement_limit=200,
 ):
     """
     Run ALNS-only experiments on real KMWE cases.
@@ -1620,6 +1652,8 @@ class MatheuristicWithArchive(Matheuristic):
         record_history=True,
         verbose=False,
         archive_top_per_generation=25,
+        show_progress=False,
+        progress_desc="GA/MH",
     ):
         population = []
         archive = []
@@ -1650,6 +1684,13 @@ class MatheuristicWithArchive(Matheuristic):
         start_clock = time.time()
         history = []
         stop_reason = None
+
+        pbar = tqdm(
+            total=max_generations if max_generations is not None else None,
+            desc=progress_desc,
+            leave=False,
+            disable=not show_progress,
+        )
 
         if record_history:
             history.append({
@@ -1748,6 +1789,14 @@ class MatheuristicWithArchive(Matheuristic):
             generation += 1
             elapsed = time.time() - start_clock
 
+            if show_progress:
+                pbar.update(1)
+                pbar.set_postfix(
+                    best=round(float(f_best), 2),
+                    noimp=int(no_improve),
+                    archive=len(unique_sorted_individuals(archive)),
+                )
+
             if record_history:
                 history.append({
                     "generation": generation,
@@ -1767,6 +1816,8 @@ class MatheuristicWithArchive(Matheuristic):
                     f"no_improve={no_improve:2d} pox={use_pox} "
                     f"time={elapsed:.2f}s archive={len(unique_sorted_individuals(archive))}"
                 )
+
+        pbar.close()
 
         if stop_reason is None:
             stop_reason = "unknown"
@@ -1799,11 +1850,12 @@ def run_ph_mh_alns_aos_on_file(
     mh_max_generations=None,
     alns_time_seconds=300.0,
     alns_iterations=1000,
-    alns_no_improvement_limit=250,
+    alns_no_improvement_limit=200,
     near_best_gap=0.10,
     num_alns_starts=3,
     reset_seed_per_alns_start=True,
     verbose=False,
+    show_progress=True,
 ):
     """
     Complete hybrid pipeline:
@@ -1834,6 +1886,8 @@ def run_ph_mh_alns_aos_on_file(
         max_generations=mh_max_generations,
         record_history=True,
         verbose=verbose,
+        show_progress=show_progress,
+        progress_desc=f"GA/MH seed={seed}",
     )
     decoder.evaluate(mh_solution)
 
@@ -1844,7 +1898,13 @@ def run_ph_mh_alns_aos_on_file(
     )
 
     alns_results = []
-    for idx, start_ind in enumerate(starts, start=1):
+    start_iterator = tqdm(
+        list(enumerate(starts, start=1)),
+        desc=f"ALNS starts seed={seed}",
+        leave=False,
+        disable=not show_progress,
+    )
+    for idx, start_ind in start_iterator:
         if reset_seed_per_alns_start:
             # Deterministic but different random stream for each ALNS start.
             alns_seed = seed * 1000 + idx
@@ -1853,6 +1913,11 @@ def run_ph_mh_alns_aos_on_file(
 
         start_ind = clone_individual(start_ind)
         decoder.evaluate(start_ind)
+        if show_progress:
+            start_iterator.set_postfix(
+                start=getattr(start_ind, "source_label", f"GA_start_{idx}"),
+                fit=round(float(start_ind.fitness), 2),
+            )
 
         alns_engine = ALNS_AOS(jobs_data, m_case, c_case, PAPER_SETUP_TIME)
         alns_solution = alns_engine.run(
@@ -1862,6 +1927,8 @@ def run_ph_mh_alns_aos_on_file(
             no_improvement_limit=alns_no_improvement_limit,
             record_history=True,
             verbose=verbose,
+            show_progress=show_progress,
+            progress_desc=f"ALNS seed={seed} start={idx}/{len(starts)}",
         )
         decoder.evaluate(alns_solution)
         alns_solution.start_label = getattr(start_ind, "source_label", f"GA_start_{idx}")
@@ -1931,6 +1998,7 @@ def run_hybrid_experiments(
     case_files,
     seeds=range(10),
     output_prefix="hybrid_ph_mh_alns_aos_results",
+    show_progress=True,
     **kwargs,
 ):
     """
@@ -1942,20 +2010,26 @@ def run_hybrid_experiments(
     all_summaries = []
     all_start_rows = []
 
-    for case_file in case_files:
-        for seed in seeds:
-            print(f"Running hybrid PH+MH+ALNS-AOS+ILP | case={case_file} | seed={seed}")
+    case_iterator = tqdm(list(case_files), desc="Cases", disable=not show_progress)
+    for case_file in case_iterator:
+        case_iterator.set_postfix(case=os.path.basename(str(case_file)))
+        seed_iterator = tqdm(list(seeds), desc=f"Seeds {os.path.basename(str(case_file))}", leave=False, disable=not show_progress)
+        for seed in seed_iterator:
+            msg = f"Running hybrid PH+MH+ALNS-AOS+ILP | case={case_file} | seed={seed}"
+            if show_progress:
+                tqdm.write(msg)
+            else:
+                print(msg)
             summary, start_rows, _ = run_ph_mh_alns_aos_on_file(
                 case_file=case_file,
                 seed=int(seed),
+                show_progress=show_progress,
                 **kwargs,
             )
             all_summaries.append(summary)
             all_start_rows.extend(start_rows)
 
             # Save after every run so partial results are not lost.
-            pd.DataFrame(all_summaries).to_csv(f"{output_prefix}_summary.csv", index=False)
-            pd.DataFrame(all_start_rows).to_csv(f"{output_prefix}_starts.csv", index=False)
 
     summary_df = pd.DataFrame(all_summaries)
     starts_df = pd.DataFrame(all_start_rows)
@@ -1964,17 +2038,499 @@ def run_hybrid_experiments(
     return summary_df, starts_df
 
 
+
+# =====================================================================
+# 8. TABLE 8 AND TABLE 14 HYBRID EXPERIMENTS
+# =====================================================================
+
+def _prepare_jobs_data_cache(jobs_data):
+    """Reset the global tool-size cache for an already-loaded/sliced instance."""
+    GLOBAL_TOOL_SIZES.clear()
+    for op in jobs_data:
+        GLOBAL_TOOL_SIZES[op["tool_set"]] = op["size"]
+
+
+def run_ph_mh_alns_aos_on_jobs_data(
+    jobs_data,
+    num_machines,
+    magazine_capacity,
+    case_label="custom_instance",
+    seed=0,
+    mh_time_seconds=PAPER_MAX_TIME_SECONDS,
+    mh_no_improvement_limit=PAPER_NO_IMPROVEMENT_LIMIT,
+    mh_pop_size=PAPER_POP_SIZE,
+    mh_max_generations=None,
+    alns_time_seconds=300.0,
+    alns_iterations=1000,
+    alns_no_improvement_limit=200,
+    near_best_gap=0.10,
+    num_alns_starts=3,
+    reset_seed_per_alns_start=True,
+    verbose=False,
+    show_progress=True,
+):
+    """
+    Same hybrid pipeline as run_ph_mh_alns_aos_on_file(...), but works on an
+    in-memory instance. This is needed for Table 8, where 6M140 is sliced into
+    n = 15, 25, 30, 60, 90, 120, 140 operations.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    _prepare_jobs_data_cache(jobs_data)
+
+    ops_by_job = build_ops_by_job(jobs_data)
+    decoder = Decoder(ops_by_job, num_machines, magazine_capacity, PAPER_SETUP_TIME)
+
+    t0 = time.time()
+    ph_engine = PractitionerHeuristic(
+        jobs_data,
+        num_machines=num_machines,
+        magazine_capacity=magazine_capacity,
+    )
+    ph_solution = ph_engine.run()
+    decoder.evaluate(ph_solution)
+    ph_runtime = time.time() - t0
+
+    mh_engine = MatheuristicWithArchive(
+        jobs_data,
+        num_machines=num_machines,
+        magazine_capacity=magazine_capacity,
+    )
+    mh_solution, ga_archive = mh_engine.run_with_archive(
+        max_time_seconds=mh_time_seconds,
+        no_improvement_limit=mh_no_improvement_limit,
+        pop_size=mh_pop_size,
+        max_generations=mh_max_generations,
+        record_history=True,
+        verbose=verbose,
+        show_progress=show_progress,
+        progress_desc=f"GA/MH {case_label} seed={seed}",
+    )
+    decoder.evaluate(mh_solution)
+
+    starts = select_three_diverse_ga_solutions(
+        ga_archive,
+        k=num_alns_starts,
+        near_best_gap=near_best_gap,
+    )
+
+    alns_results = []
+    start_iterator = tqdm(
+        list(enumerate(starts, start=1)),
+        desc=f"ALNS starts {case_label} seed={seed}",
+        leave=False,
+        disable=not show_progress,
+    )
+
+    for idx, start_ind in start_iterator:
+        if reset_seed_per_alns_start:
+            alns_seed = seed * 1000 + idx
+            random.seed(alns_seed)
+            np.random.seed(alns_seed)
+
+        start_ind = clone_individual(start_ind)
+        decoder.evaluate(start_ind)
+
+        if show_progress:
+            start_iterator.set_postfix(
+                start=getattr(start_ind, "source_label", f"GA_start_{idx}"),
+                fit=round(float(start_ind.fitness), 2),
+            )
+
+        alns_engine = ALNS_AOS(jobs_data, num_machines, magazine_capacity, PAPER_SETUP_TIME)
+        alns_solution = alns_engine.run(
+            start_ind,
+            max_time_seconds=alns_time_seconds,
+            max_iterations=alns_iterations,
+            no_improvement_limit=alns_no_improvement_limit,
+            record_history=True,
+            verbose=verbose,
+            show_progress=show_progress,
+            progress_desc=f"ALNS {case_label} seed={seed} start={idx}/{len(starts)}",
+        )
+        decoder.evaluate(alns_solution)
+        alns_solution.start_label = getattr(start_ind, "source_label", f"GA_start_{idx}")
+        alns_solution.start_rank = idx
+        alns_solution.start_fitness = float(start_ind.fitness)
+        alns_solution.start_tardiness = float(start_ind.tardiness)
+        alns_solution.start_setups = int(start_ind.setups)
+        alns_solution.start_diversity = float(getattr(start_ind, "source_diversity", 0.0))
+        alns_results.append(alns_solution)
+
+    best_hybrid = min(alns_results, key=lambda x: (x.fitness, x.tardiness, x.setups))
+
+    start_rows = []
+    for sol in alns_results:
+        start_rows.append({
+            "case_label": case_label,
+            "seed": seed,
+            "start_rank": sol.start_rank,
+            "start_label": sol.start_label,
+            "start_fitness": sol.start_fitness,
+            "start_tardiness": sol.start_tardiness,
+            "start_setups": sol.start_setups,
+            "start_diversity": sol.start_diversity,
+            "ALNS_fitness": sol.fitness,
+            "ALNS_tardiness": sol.tardiness,
+            "ALNS_setups": sol.setups,
+            "ALNS_runtime": getattr(sol, "alns_runtime", np.nan),
+            "ALNS_iterations": getattr(sol, "alns_iterations", np.nan),
+            "ALNS_stop_reason": getattr(sol, "alns_stop_reason", "unknown"),
+            "is_best_hybrid_start": sol is best_hybrid,
+        })
+
+    summary = {
+        "case_label": case_label,
+        "seed": seed,
+        "PH_fitness": ph_solution.fitness,
+        "PH_tardiness": ph_solution.tardiness,
+        "PH_setups": ph_solution.setups,
+        "PH_runtime": ph_runtime,
+        "MH_fitness": mh_solution.fitness,
+        "MH_tardiness": mh_solution.tardiness,
+        "MH_setups": mh_solution.setups,
+        "MH_runtime": getattr(mh_solution, "runtime", np.nan),
+        "MH_generations": getattr(mh_solution, "generations", np.nan),
+        "MH_stop_reason": getattr(mh_solution, "stop_reason", "unknown"),
+        "GA_archive_unique_size": len(ga_archive),
+        "Hybrid_fitness": best_hybrid.fitness,
+        "Hybrid_tardiness": best_hybrid.tardiness,
+        "Hybrid_setups": best_hybrid.setups,
+        "Hybrid_ALNS_runtime": getattr(best_hybrid, "alns_runtime", np.nan),
+        "Hybrid_total_runtime": ph_runtime + getattr(mh_solution, "runtime", 0.0) + sum(getattr(s, "alns_runtime", 0.0) for s in alns_results),
+        "Best_ALNS_start_label": getattr(best_hybrid, "start_label", "unknown"),
+        "Best_ALNS_start_rank": getattr(best_hybrid, "start_rank", np.nan),
+    }
+
+    return summary, start_rows, {
+        "ph_solution": ph_solution,
+        "mh_solution": mh_solution,
+        "ga_starts": starts,
+        "alns_results": alns_results,
+        "best_hybrid": best_hybrid,
+        "ga_archive": ga_archive,
+    }
+
+
+
+def _aggregate_hybrid_records(records, group_col):
+    """Aggregate seed-level hybrid records into a paper-compatible summary table."""
+    rows = []
+    df = pd.DataFrame(records)
+    if df.empty:
+        return pd.DataFrame()
+
+    for key, g in df.groupby(group_col, sort=False):
+        ph = g["PH_fitness"].astype(float)
+        mh = g["MH_fitness"].astype(float)
+        hy = g["Hybrid_fitness"].astype(float)
+
+        ph_mean = float(ph.mean())
+        mh_mean = float(mh.mean())
+        hy_mean = float(hy.mean())
+
+        means = {"PH": ph_mean, "MH": mh_mean, "ALNS": hy_mean}
+        best_method = min(means, key=means.get)
+
+        rows.append({
+            group_col: key,
+            "PH_μ": round(ph_mean, 2),
+            "PH_σ": round(float(ph.std(ddof=0)), 2),
+            "PH_best": round(float(ph.min()), 2),
+            "PH_C.T.(s)": round(float(g["PH_runtime"].mean()), 3),
+            "MH_μ": round(mh_mean, 2),
+            "MH_σ": round(float(mh.std(ddof=0)), 2),
+            "MH_best": round(float(mh.min()), 2),
+            "MH_C.T.(s)": round(float(g["MH_runtime"].mean()), 3),
+            "MH_gen_μ": round(float(g["MH_generations"].mean()), 1),
+            "ALNS_μ": round(hy_mean, 2),
+            "ALNS_σ": round(float(hy.std(ddof=0)), 2),
+            "ALNS_best": round(float(hy.min()), 2),
+            "ALNS_C.T.(s)": round(float(g["Hybrid_total_runtime"].mean()), 3),
+            "ALNS_phase_C.T.(s)": round(float(g["Hybrid_ALNS_runtime"].mean()), 3),
+            "ALNS_it_μ": round(float(g["Hybrid_ALNS_iterations"].mean()), 1),
+            "StopReasons": ",".join(sorted(set(map(str, g["MH_stop_reason"])))),
+            "ALNS_StopReasons": ",".join(sorted(set(map(str, g["Hybrid_ALNS_stop_reason"])))),
+            "Gap_MH_vs_PH (%)": f"{((mh_mean - ph_mean) / max(1.0, ph_mean)) * 100.0:.2f}%",
+            "Gap_ALNS_vs_PH (%)": f"{((hy_mean - ph_mean) / max(1.0, ph_mean)) * 100.0:.2f}%",
+            "Gap_ALNS_vs_MH (%)": f"{((hy_mean - mh_mean) / max(1.0, mh_mean)) * 100.0:.2f}%",
+            "Best_Method": best_method,
+            "Best_μ": round(float(means[best_method]), 2),
+        })
+    return pd.DataFrame(rows)
+
+
+def _paper_like_table8_from_hybrid(run_records):
+    """Return Table 8 with the same leading layout as Paper_replication_Lars plus hybrid columns."""
+    full = _aggregate_hybrid_records(run_records, "n")
+    if full.empty:
+        return full
+    cols = [
+        "n",
+        "PH_μ", "PH_σ", "PH_best", "PH_C.T.(s)",
+        "MH_μ", "MH_σ", "MH_best", "MH_C.T.(s)", "MH_gen_μ",
+        "StopReasons", "Gap_MH_vs_PH (%)",
+        "ALNS_μ", "ALNS_σ", "ALNS_best", "ALNS_C.T.(s)", "ALNS_phase_C.T.(s)", "ALNS_it_μ",
+        "ALNS_StopReasons", "Gap_ALNS_vs_PH (%)", "Gap_ALNS_vs_MH (%)",
+        "Best_Method", "Best_μ",
+    ]
+    return full[cols]
+
+
+def _paper_like_table14_from_hybrid(run_records):
+    """Return Table 14 with the same leading layout as Paper_replication_Lars plus hybrid columns."""
+    full = _aggregate_hybrid_records(run_records, "BaseCase")
+    if full.empty:
+        return full
+    cols = [
+        "BaseCase",
+        "PH_μ", "PH_σ", "PH_best", "PH_C.T.(s)",
+        "MH_μ", "MH_σ", "MH_best", "MH_C.T.(s)", "MH_gen_μ",
+        "StopReasons", "Gap_MH_vs_PH (%)",
+        "ALNS_μ", "ALNS_σ", "ALNS_best", "ALNS_C.T.(s)", "ALNS_phase_C.T.(s)", "ALNS_it_μ",
+        "ALNS_StopReasons", "Gap_ALNS_vs_PH (%)", "Gap_ALNS_vs_MH (%)",
+        "Best_Method", "Best_μ",
+    ]
+    out = full[cols].rename(columns={"Gap_MH_vs_PH (%)": "Net_Gap_MH (%)"})
+    return out
+
+
+def _enrich_summary_with_best_alns_metadata(summary, objects):
+    """Add best ALNS metadata to the seed-level summary record for aggregation."""
+    best_hybrid = objects["best_hybrid"]
+    summary["Hybrid_ALNS_iterations"] = getattr(best_hybrid, "alns_iterations", np.nan)
+    summary["Hybrid_ALNS_stop_reason"] = getattr(best_hybrid, "alns_stop_reason", "unknown")
+    return summary
+
+
+def run_hybrid_table8_replications(
+    num_runs=10,
+    output_prefix="hybrid_table8",
+    mh_time_seconds=PAPER_MAX_TIME_SECONDS,
+    mh_no_improvement_limit=PAPER_NO_IMPROVEMENT_LIMIT,
+    mh_pop_size=PAPER_POP_SIZE,
+    mh_max_generations=None,
+    alns_time_seconds=300.0,
+    alns_iterations=1000,
+    alns_no_improvement_limit=200,
+    near_best_gap=0.10,
+    num_alns_starts=3,
+    show_progress=True,
+    verbose=False,
+):
+    """
+    Produce the PH + MH + ALNS version of Table 8 with the same print style as Paper_replication_Lars.
+
+    Defaults use 10 replications: seeds 0, 1, ..., 9.
+    No CSV files are written; results are printed to the console and returned as DataFrames.
+    """
+    print("\n[EXACT REPLICATION: TABLE 8 - Operational Scaling Framework on 6M140]")
+
+    case_file = resolve_kmwe_case_file("6M140")
+    full_jobs_data, m_val, c_val = load_actual_kmwe_instance(case_file)
+    df_sorted = pd.DataFrame(full_jobs_data).sort_values(by="r").copy()
+
+    run_records = []
+    start_records = []
+    n_values = [15, 25, 30, 60, 90, 120, 140]
+
+    n_iterator = tqdm(n_values, desc="Table 8 n-slices", disable=not show_progress)
+    for n_slice in n_iterator:
+        n_iterator.set_postfix(n=n_slice)
+        sliced_ops = df_sorted.head(n_slice).to_dict(orient="records")
+        seed_iterator = tqdm(range(num_runs), desc=f"Seeds n={n_slice}", leave=False, disable=not show_progress)
+        for seed in seed_iterator:
+            if show_progress:
+                tqdm.write(f"Table 8 | n={n_slice} | seed={seed}")
+
+            # The same replication seeds as Paper_replication_Lars: 0..num_runs-1.
+            random.seed(int(seed))
+            np.random.seed(int(seed))
+
+            summary, starts, objects = run_ph_mh_alns_aos_on_jobs_data(
+                sliced_ops,
+                num_machines=m_val,
+                magazine_capacity=c_val,
+                case_label=f"6M140_n{n_slice}",
+                seed=int(seed),
+                mh_time_seconds=mh_time_seconds,
+                mh_no_improvement_limit=mh_no_improvement_limit,
+                mh_pop_size=mh_pop_size,
+                mh_max_generations=mh_max_generations,
+                alns_time_seconds=alns_time_seconds,
+                alns_iterations=alns_iterations,
+                alns_no_improvement_limit=alns_no_improvement_limit,
+                near_best_gap=near_best_gap,
+                num_alns_starts=num_alns_starts,
+                verbose=verbose,
+                show_progress=show_progress,
+            )
+            summary = _enrich_summary_with_best_alns_metadata(summary, objects)
+            summary["n"] = n_slice
+            for row in starts:
+                row["n"] = n_slice
+            run_records.append(summary)
+            start_records.extend(starts)
+
+
+    summary_df = _paper_like_table8_from_hybrid(run_records)
+    print(summary_df.to_string(index=False))
+    return summary_df, pd.DataFrame(run_records), pd.DataFrame(start_records)
+
+
+def run_hybrid_table14_replications(
+    num_runs=10,
+    output_prefix="hybrid_table14",
+    case_names=("2M38", "2M46", "6M140", "6M163"),
+    mh_time_seconds=PAPER_MAX_TIME_SECONDS,
+    mh_no_improvement_limit=PAPER_NO_IMPROVEMENT_LIMIT,
+    mh_pop_size=PAPER_POP_SIZE,
+    mh_max_generations=None,
+    alns_time_seconds=300.0,
+    alns_iterations=1000,
+    alns_no_improvement_limit=200,
+    near_best_gap=0.10,
+    num_alns_starts=3,
+    show_progress=True,
+    verbose=False,
+):
+    """
+    Produce the PH + MH + ALNS version of Table 14 with the same print style as Paper_replication_Lars.
+
+    Defaults use 10 replications: seeds 0, 1, ..., 9.
+    No CSV files are written; results are printed to the console and returned as DataFrames.
+    """
+    print("\n[EXACT REPLICATION: TABLE 14 - Production Base-Case Workcenters]")
+
+    run_records = []
+    start_records = []
+    case_iterator = tqdm(list(case_names), desc="Table 14 cases", disable=not show_progress)
+
+    for case_name in case_iterator:
+        case_iterator.set_postfix(case=case_name)
+        try:
+            case_file = resolve_kmwe_case_file(case_name)
+        except FileNotFoundError:
+            print(f"Skipping baseline verification for {case_name}: Target CSV file missing.")
+            continue
+
+        seed_iterator = tqdm(range(num_runs), desc=f"Seeds {case_name}", leave=False, disable=not show_progress)
+        for seed in seed_iterator:
+            if show_progress:
+                tqdm.write(f"Table 14 | case={case_name} | seed={seed}")
+
+            # The same replication seeds as Paper_replication_Lars: 0..num_runs-1.
+            random.seed(int(seed))
+            np.random.seed(int(seed))
+
+            summary, starts, objects = run_ph_mh_alns_aos_on_file(
+                case_file=case_file,
+                seed=int(seed),
+                mh_time_seconds=mh_time_seconds,
+                mh_no_improvement_limit=mh_no_improvement_limit,
+                mh_pop_size=mh_pop_size,
+                mh_max_generations=mh_max_generations,
+                alns_time_seconds=alns_time_seconds,
+                alns_iterations=alns_iterations,
+                alns_no_improvement_limit=alns_no_improvement_limit,
+                near_best_gap=near_best_gap,
+                num_alns_starts=num_alns_starts,
+                verbose=verbose,
+                show_progress=show_progress,
+            )
+            summary = _enrich_summary_with_best_alns_metadata(summary, objects)
+            summary["BaseCase"] = case_name
+            for row in starts:
+                row["BaseCase"] = case_name
+            run_records.append(summary)
+            start_records.extend(starts)
+
+
+    summary_df = _paper_like_table14_from_hybrid(run_records)
+    print(summary_df.to_string(index=False))
+    return summary_df, pd.DataFrame(run_records), pd.DataFrame(start_records)
+
+
+def run_exact_hybrid_replications(
+    num_runs=10,
+    mh_time_seconds=PAPER_MAX_TIME_SECONDS,
+    mh_no_improvement_limit=PAPER_NO_IMPROVEMENT_LIMIT,
+    mh_pop_size=PAPER_POP_SIZE,
+    mh_max_generations=None,
+    alns_time_seconds=300.0,
+    alns_iterations=1000,
+    alns_no_improvement_limit=200,
+    near_best_gap=0.10,
+    num_alns_starts=3,
+    show_progress=True,
+    verbose=False,
+):
+    """
+    Main runner with the same console structure as Paper_replication_Lars.
+
+    It produces Table 8 and Table 14 using 10 replications by default.
+    """
+    print("=" * 110)
+    print(f" TRUE EXPERIMENTAL ENGINE: REPLICATING EXACT TABLES ({num_runs} SEED SAMPLES) ".center(110, "#"))
+    print("=" * 110)
+
+    table8_summary, table8_runs, table8_starts = run_hybrid_table8_replications(
+        num_runs=num_runs,
+        output_prefix="hybrid_table8",
+        mh_time_seconds=mh_time_seconds,
+        mh_no_improvement_limit=mh_no_improvement_limit,
+        mh_pop_size=mh_pop_size,
+        mh_max_generations=mh_max_generations,
+        alns_time_seconds=alns_time_seconds,
+        alns_iterations=alns_iterations,
+        alns_no_improvement_limit=alns_no_improvement_limit,
+        near_best_gap=near_best_gap,
+        num_alns_starts=num_alns_starts,
+        show_progress=show_progress,
+        verbose=verbose,
+    )
+
+    table14_summary, table14_runs, table14_starts = run_hybrid_table14_replications(
+        num_runs=num_runs,
+        output_prefix="hybrid_table14",
+        mh_time_seconds=mh_time_seconds,
+        mh_no_improvement_limit=mh_no_improvement_limit,
+        mh_pop_size=mh_pop_size,
+        mh_max_generations=mh_max_generations,
+        alns_time_seconds=alns_time_seconds,
+        alns_iterations=alns_iterations,
+        alns_no_improvement_limit=alns_no_improvement_limit,
+        near_best_gap=near_best_gap,
+        num_alns_starts=num_alns_starts,
+        show_progress=show_progress,
+        verbose=verbose,
+    )
+
+    return {
+        "table8_summary": table8_summary,
+        "table8_runs": table8_runs,
+        "table8_starts": table8_starts,
+        "table14_summary": table14_summary,
+        "table14_runs": table14_runs,
+        "table14_starts": table14_starts,
+    }
+
+
+# Backward-compatible alias: running this file behaves like the paper replication script,
+# but with the added ALNS columns.
+def run_exact_paper_replications(num_runs=10):
+    return run_exact_hybrid_replications(num_runs=num_runs)
+
+
 if __name__ == "__main__":
-    # Example usage. Edit these paths and time limits for your experiments.
-    # case_files = [resolve_kmwe_case_file("6M140")]
-    # run_hybrid_experiments(
-    #     case_files=case_files,
-    #     seeds=range(10),
-    #     mh_time_seconds=3600.0,
-    #     alns_time_seconds=300.0,
-    #     alns_iterations=1000,
-    #     alns_no_improvement_limit=250,
-    #     near_best_gap=0.10,
-    #     verbose=False,
-    # )
-    pass
+    # Final default: exactly 10 replications, using seeds 0..9, like the paper-style runner.
+    # This can take a long time because each seed runs PH + MH/GA + 3 ALNS-AOS starts.
+    run_exact_hybrid_replications(
+        num_runs=10,
+        mh_time_seconds=3600.0,
+        mh_no_improvement_limit=20,
+        alns_time_seconds=300.0,
+        alns_iterations=1000,
+        alns_no_improvement_limit=200,
+        show_progress=True,
+    )
