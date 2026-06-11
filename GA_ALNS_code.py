@@ -1005,9 +1005,9 @@ def resolve_kmwe_case_file(case_name):
 def run_alns_only_on_file(
     case_file,
     seed=0,
-    alns_time_seconds=300.0,
-    alns_iterations=1000,
-    alns_no_improvement_limit=200,
+    alns_time_seconds=600.0,
+    alns_iterations=2000,
+    alns_no_improvement_limit=500,
     verbose=False,
     show_progress=False,
 ):
@@ -1044,7 +1044,7 @@ def run_alns_only_on_file(
         record_history=True,
         verbose=verbose,
         show_progress=show_progress,
-        progress_desc=f"GA/MH seed={seed}",
+        progress_desc=f"ALNS-only seed={seed}",
     )
 
     decoder.evaluate(alns_solution)
@@ -1074,9 +1074,9 @@ def run_alns_only_on_file(
 
 def run_alns_table8_replications(
     num_runs=10,
-    alns_time_seconds=300.0,
-    alns_iterations=1000,
-    alns_no_improvement_limit=200,
+    alns_time_seconds=600.0,
+    alns_iterations=2000,
+    alns_no_improvement_limit=500,
 ):
     """
     Build a Table 8-style ALNS-only experiment on the real 6M140 KMWE case.
@@ -1172,9 +1172,9 @@ def run_alns_table8_replications(
 
 def run_alns_only_replications(
     num_runs=10,
-    alns_time_seconds=300.0,
-    alns_iterations=1000,
-    alns_no_improvement_limit=200,
+    alns_time_seconds=600.0,
+    alns_iterations=2000,
+    alns_no_improvement_limit=500,
 ):
     """
     Run ALNS-only experiments on real KMWE cases.
@@ -1185,7 +1185,7 @@ def run_alns_only_replications(
     Synthetic/mock data is disabled.
     """
     print("=" * 120)
-    print(f" REAL KMWE LONG-EXPLORATION ALNS-ONLY ENGINE: PH vs ALNS-AOS+TRP ({num_runs} SEED SAMPLES) ".center(120, "#"))
+    print(f" DEPRECATED ALNS-ONLY ENGINE: use run_ph_ga_mh_alns_ilp_on_file instead ({num_runs} SEED SAMPLES) ".center(120, "#"))
     print("=" * 120)
 
     rows = []
@@ -1539,7 +1539,7 @@ class Matheuristic:
 
 
 # =====================================================================
-# 7. PH + GA/MH + ALNS-AOS + ILP HYBRID ENGINE
+# 7. STRICT PH -> GA/MH -> ALNS-AOS -> ILP HYBRID ENGINE
 # =====================================================================
 
 def clone_individual(ind):
@@ -1629,6 +1629,19 @@ def select_three_diverse_ga_solutions(
         ind.source_rank = idx
         ind.source_label = "GA_best" if idx == 1 else f"GA_diverse_{idx}"
     return chosen
+
+
+def select_best_ga_solution(archive):
+    """Return only the single best unique GA/MH solution for the ALNS start."""
+    ranked = unique_sorted_individuals(archive)
+    if not ranked:
+        raise ValueError("Cannot select GA solution: archive is empty.")
+
+    best = clone_individual(ranked[0])
+    best.source_rank = 1
+    best.source_label = "GA_best"
+    best.source_diversity = 0.0
+    return [best]
 
 
 class MatheuristicWithArchive(Matheuristic):
@@ -1848,18 +1861,18 @@ def run_ph_mh_alns_aos_on_file(
     mh_no_improvement_limit=PAPER_NO_IMPROVEMENT_LIMIT,
     mh_pop_size=PAPER_POP_SIZE,
     mh_max_generations=None,
-    alns_time_seconds=300.0,
-    alns_iterations=1000,
-    alns_no_improvement_limit=200,
+    alns_time_seconds=600.0,
+    alns_iterations=2000,
+    alns_no_improvement_limit=500,
     near_best_gap=0.10,
-    num_alns_starts=3,
+    num_alns_starts=1,
     reset_seed_per_alns_start=True,
     verbose=False,
     show_progress=True,
 ):
     """
     Complete hybrid pipeline:
-        PH -> paper-style GA/MH -> select 3 GA/MH starts -> ALNS-AOS -> ILP/TRM decoder.
+        PH -> paper-style GA/MH -> select the best GA/MH start -> ALNS-AOS -> final ILP/TRM decoder evaluation.
 
     The GA/MH phase follows the same operators and stopping logic as the paper replication code.
     The ALNS-AOS phase uses the same ALNS_AOS class as the longer ALNS code.
@@ -1887,15 +1900,14 @@ def run_ph_mh_alns_aos_on_file(
         record_history=True,
         verbose=verbose,
         show_progress=show_progress,
-        progress_desc=f"GA/MH seed={seed}",
+        progress_desc=f"ALNS-only seed={seed}",
     )
     decoder.evaluate(mh_solution)
 
-    starts = select_three_diverse_ga_solutions(
-        ga_archive,
-        k=num_alns_starts,
-        near_best_gap=near_best_gap,
-    )
+    # Use only the single best GA/MH solution as the ALNS starting point.
+    # near_best_gap and num_alns_starts are retained in the signature for
+    # backward compatibility with existing experiment scripts.
+    starts = select_best_ga_solution(ga_archive)
 
     alns_results = []
     start_iterator = tqdm(
@@ -1978,6 +1990,9 @@ def run_ph_mh_alns_aos_on_file(
         "Hybrid_fitness": best_hybrid.fitness,
         "Hybrid_tardiness": best_hybrid.tardiness,
         "Hybrid_setups": best_hybrid.setups,
+        "ILP_final_fitness": best_hybrid.fitness,
+        "ILP_final_tardiness": best_hybrid.tardiness,
+        "ILP_final_setups": best_hybrid.setups,
         "Hybrid_ALNS_runtime": getattr(best_hybrid, "alns_runtime", np.nan),
         "Hybrid_total_runtime": ph_runtime + getattr(mh_solution, "runtime", 0.0) + sum(getattr(s, "alns_runtime", 0.0) for s in alns_results),
         "Best_ALNS_start_label": getattr(best_hybrid, "start_label", "unknown"),
@@ -2015,7 +2030,7 @@ def run_hybrid_experiments(
         case_iterator.set_postfix(case=os.path.basename(str(case_file)))
         seed_iterator = tqdm(list(seeds), desc=f"Seeds {os.path.basename(str(case_file))}", leave=False, disable=not show_progress)
         for seed in seed_iterator:
-            msg = f"Running hybrid PH+MH+ALNS-AOS+ILP | case={case_file} | seed={seed}"
+            msg = f"Running strict PH -> GA/MH -> ALNS-AOS -> ILP | case={case_file} | seed={seed}"
             if show_progress:
                 tqdm.write(msg)
             else:
@@ -2039,6 +2054,35 @@ def run_hybrid_experiments(
 
 
 
+# User-facing strict pipeline aliases. These names make the execution order explicit.
+def run_ph_ga_mh_alns_ilp_on_file(*args, **kwargs):
+    """
+    Strict project pipeline:
+        PH -> GA/MH -> ALNS-AOS -> final ILP/TRM decoder evaluation.
+
+    This is an alias for run_ph_mh_alns_aos_on_file(...). The last step is
+    the final Decoder.evaluate(...), where the exact TRM/ILP tool-replacement
+    model is called whenever capacity must be freed.
+    """
+    return run_ph_mh_alns_aos_on_file(*args, **kwargs)
+
+
+def run_ph_ga_mh_alns_ilp_on_jobs_data(*args, **kwargs):
+    """
+    In-memory strict project pipeline:
+        PH -> GA/MH -> ALNS-AOS -> final ILP/TRM decoder evaluation.
+    """
+    return run_ph_mh_alns_aos_on_jobs_data(*args, **kwargs)
+
+
+def run_strict_hybrid_experiments(*args, **kwargs):
+    """
+    Batch strict project pipeline:
+        PH -> GA/MH -> ALNS-AOS -> final ILP/TRM decoder evaluation.
+    """
+    return run_hybrid_experiments(*args, **kwargs)
+
+
 # =====================================================================
 # 8. TABLE 8 AND TABLE 14 HYBRID EXPERIMENTS
 # =====================================================================
@@ -2060,11 +2104,11 @@ def run_ph_mh_alns_aos_on_jobs_data(
     mh_no_improvement_limit=PAPER_NO_IMPROVEMENT_LIMIT,
     mh_pop_size=PAPER_POP_SIZE,
     mh_max_generations=None,
-    alns_time_seconds=300.0,
-    alns_iterations=1000,
-    alns_no_improvement_limit=200,
+    alns_time_seconds=600.0,
+    alns_iterations=2000,
+    alns_no_improvement_limit=500,
     near_best_gap=0.10,
-    num_alns_starts=3,
+    num_alns_starts=1,
     reset_seed_per_alns_start=True,
     verbose=False,
     show_progress=True,
@@ -2108,11 +2152,10 @@ def run_ph_mh_alns_aos_on_jobs_data(
     )
     decoder.evaluate(mh_solution)
 
-    starts = select_three_diverse_ga_solutions(
-        ga_archive,
-        k=num_alns_starts,
-        near_best_gap=near_best_gap,
-    )
+    # Use only the single best GA/MH solution as the ALNS starting point.
+    # near_best_gap and num_alns_starts are retained in the signature for
+    # backward compatibility with existing experiment scripts.
+    starts = select_best_ga_solution(ga_archive)
 
     alns_results = []
     start_iterator = tqdm(
@@ -2196,6 +2239,9 @@ def run_ph_mh_alns_aos_on_jobs_data(
         "Hybrid_fitness": best_hybrid.fitness,
         "Hybrid_tardiness": best_hybrid.tardiness,
         "Hybrid_setups": best_hybrid.setups,
+        "ILP_final_fitness": best_hybrid.fitness,
+        "ILP_final_tardiness": best_hybrid.tardiness,
+        "ILP_final_setups": best_hybrid.setups,
         "Hybrid_ALNS_runtime": getattr(best_hybrid, "alns_runtime", np.nan),
         "Hybrid_total_runtime": ph_runtime + getattr(mh_solution, "runtime", 0.0) + sum(getattr(s, "alns_runtime", 0.0) for s in alns_results),
         "Best_ALNS_start_label": getattr(best_hybrid, "start_label", "unknown"),
@@ -2310,11 +2356,11 @@ def run_hybrid_table8_replications(
     mh_no_improvement_limit=PAPER_NO_IMPROVEMENT_LIMIT,
     mh_pop_size=PAPER_POP_SIZE,
     mh_max_generations=None,
-    alns_time_seconds=300.0,
-    alns_iterations=1000,
-    alns_no_improvement_limit=200,
+    alns_time_seconds=600.0,
+    alns_iterations=2000,
+    alns_no_improvement_limit=500,
     near_best_gap=0.10,
-    num_alns_starts=3,
+    num_alns_starts=1,
     show_progress=True,
     verbose=False,
 ):
@@ -2386,11 +2432,11 @@ def run_hybrid_table14_replications(
     mh_no_improvement_limit=PAPER_NO_IMPROVEMENT_LIMIT,
     mh_pop_size=PAPER_POP_SIZE,
     mh_max_generations=None,
-    alns_time_seconds=300.0,
-    alns_iterations=1000,
-    alns_no_improvement_limit=200,
+    alns_time_seconds=600.0,
+    alns_iterations=2000,
+    alns_no_improvement_limit=500,
     near_best_gap=0.10,
-    num_alns_starts=3,
+    num_alns_starts=1,
     show_progress=True,
     verbose=False,
 ):
@@ -2457,11 +2503,11 @@ def run_exact_hybrid_replications(
     mh_no_improvement_limit=PAPER_NO_IMPROVEMENT_LIMIT,
     mh_pop_size=PAPER_POP_SIZE,
     mh_max_generations=None,
-    alns_time_seconds=300.0,
-    alns_iterations=1000,
-    alns_no_improvement_limit=200,
+    alns_time_seconds=600.0,
+    alns_iterations=2000,
+    alns_no_improvement_limit=500,
     near_best_gap=0.10,
-    num_alns_starts=3,
+    num_alns_starts=1,
     show_progress=True,
     verbose=False,
 ):
@@ -2524,13 +2570,13 @@ def run_exact_paper_replications(num_runs=10):
 
 if __name__ == "__main__":
     # Final default: exactly 10 replications, using seeds 0..9, like the paper-style runner.
-    # This can take a long time because each seed runs PH + MH/GA + 3 ALNS-AOS starts.
+    # This can take a long time because each seed runs PH + MH/GA + 1 ALNS-AOS start.
     run_exact_hybrid_replications(
         num_runs=10,
         mh_time_seconds=3600.0,
-        mh_no_improvement_limit=100,
-        alns_time_seconds=300.0,
-        alns_iterations=1000,
-        alns_no_improvement_limit=200,
+        mh_no_improvement_limit=PAPER_NO_IMPROVEMENT_LIMIT,
+        alns_time_seconds=600.0,
+        alns_iterations=2000,
+        alns_no_improvement_limit=500,
         show_progress=True,
     )
