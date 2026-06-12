@@ -4,6 +4,12 @@ import time
 import numpy as np
 import pandas as pd
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # Fallback so the script still runs if tqdm is not installed.
+    def tqdm(iterable=None, *args, **kwargs):
+        return iterable
+
 # Global cache for tool sizes to optimize search speed in the knapsack solver
 GLOBAL_TOOL_SIZES = {}
 
@@ -1097,11 +1103,11 @@ def run_alns_table8_replications(
     rows = []
     table8_seed_records = []
 
-    for n_slice in [15, 25, 30, 60, 90, 120, 140]:
+    for n_slice in tqdm([15, 25, 30, 60, 90, 120, 140], desc="Table 8 Instances"):
         sliced_ops = df_sorted.head(n_slice).to_dict(orient="records")
         records = []
 
-        for seed in range(num_runs):
+        for seed in tqdm(range(num_runs), desc=f"n={n_slice}", leave=False):
             random.seed(seed)
             np.random.seed(seed)
 
@@ -1195,11 +1201,11 @@ def run_alns_only_replications(
     rows = []
     basecase_seed_records = []
 
-    for case_name in ["2M38", "2M46", "6M140", "6M163"]:
+    for case_name in tqdm(["2M38", "2M46", "6M140", "6M163"], desc="Base Cases"):
         case_file = resolve_kmwe_case_file(case_name)
         records = []
 
-        for seed in range(num_runs):
+        for seed in tqdm(range(num_runs), desc=f"{case_name}", leave=False):
             _, result = run_alns_only_on_file(
                 case_file,
                 seed=seed,
