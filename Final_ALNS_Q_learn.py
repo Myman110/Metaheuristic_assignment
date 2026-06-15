@@ -1296,6 +1296,7 @@ def run_alns_only_on_file(
     alns_iterations=2000,
     alns_no_improvement_limit=500,
     verbose=False,
+    print_result=False,
 ):
     """
     Run ALNS-AOS+TRP only, initialized by the Practitioner Heuristic.
@@ -1351,7 +1352,8 @@ def run_alns_only_on_file(
         "Improvement_vs_PH_%": ((alns_solution.fitness - ph_solution.fitness) / max(1.0, ph_solution.fitness)) * 100.0,
     }
 
-    print(pd.DataFrame([result]).to_string(index=False))
+    if print_result:
+        print(pd.DataFrame([result]).to_string(index=False))
     return alns_solution, result
 
 
@@ -1512,6 +1514,8 @@ def run_alns_only_replications(
             result["seed"] = seed
             records.append(result)
 
+        basecase_seed_records.extend(records)
+
         ph = np.array([r["PH_fitness"] for r in records], dtype=float)
         alns = np.array([r["ALNS_fitness"] for r in records], dtype=float)
 
@@ -1535,9 +1539,63 @@ def run_alns_only_replications(
     return summary, pd.DataFrame(basecase_seed_records)
 
 
+def run_table8_and_table14_replications(
+    num_runs=10,
+    alns_time_seconds=600.0,
+    alns_iterations=2000,
+    alns_no_improvement_limit=500,
+    output_excel="alns_table8_table14_all_seed_results.xlsx",
+):
+    """
+    Run Table 8-style slice experiments and Table 14-style base-case
+    experiments, then export everything to one Excel workbook.
+
+    Workbook sheets:
+        table8_summary
+        table8_seed_results
+        table14_summary
+        table14_seed_results
+
+    This function avoids relying on printed output. Each experiment returns
+    DataFrames, and those DataFrames are written directly to Excel. tqdm
+    progress bars remain active for cases, slices, seeds, and ALNS iterations.
+    """
+    table8_summary, table8_seed_results = run_alns_table8_replications(
+        num_runs=num_runs,
+        alns_time_seconds=alns_time_seconds,
+        alns_iterations=alns_iterations,
+        alns_no_improvement_limit=alns_no_improvement_limit,
+        output_excel=None,
+    )
+
+    table14_summary, table14_seed_results = run_alns_only_replications(
+        num_runs=num_runs,
+        alns_time_seconds=alns_time_seconds,
+        alns_iterations=alns_iterations,
+        alns_no_improvement_limit=alns_no_improvement_limit,
+        output_excel=None,
+    )
+
+    export_seed_results_to_excel(
+        output_excel,
+        table8_summary=table8_summary,
+        table8_seed_results=table8_seed_results,
+        table14_summary=table14_summary,
+        table14_seed_results=table14_seed_results,
+    )
+
+    return {
+        "table8_summary": table8_summary,
+        "table8_seed_results": table8_seed_results,
+        "table14_summary": table14_summary,
+        "table14_seed_results": table14_seed_results,
+    }
+
+
 if __name__ == "__main__":
     # Longer ALNS+AOS exploration defaults:
     #   600 seconds, 2000 iterations, 500 no-improvement iterations.
     # This gives AOS more time to adapt operator weights.
-    run_alns_table8_replications(num_runs=10)
-    run_alns_only_replications(num_runs=10)
+    # One workbook is produced with Table 8 and Table 14 summaries plus
+    # all per-seed rows. tqdm progress bars show case/slice/seed progress.
+    run_table8_and_table14_replications(num_runs=10)
