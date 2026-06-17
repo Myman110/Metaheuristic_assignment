@@ -12,7 +12,7 @@ files = {
     "Baseline": "Baseline_paper_results.xlsx",
     "ALNS_AOS": "ALNS_AOS_Results.xlsx",
     "Hybrid_GA_ALNS": "hybrid_ph_mh_alns_seed_results.xlsx",
-    "ALNS_Q_learning": "ALNS_q_learning.xlsx",
+    "ALNS_Q_learning": "ALNS_q_learn.xlsx",
 }
 
 output_file = "wilcoxon_case_means_runtime_ARPD_no_paper100.xlsx"
