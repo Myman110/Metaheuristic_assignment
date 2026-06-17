@@ -3,7 +3,6 @@ import random
 import time
 import numpy as np
 import pandas as pd
-from scipy.optimize import milp, LinearConstraint, Bounds
 
 # Global lookup for tool sizing dependencies
 GLOBAL_TOOL_SIZES = {}
