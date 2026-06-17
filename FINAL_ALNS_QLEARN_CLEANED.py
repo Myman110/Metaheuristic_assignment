@@ -446,7 +446,7 @@ class ALNS_AOS:
             self.q_table[state] = {action: 0.0 for action in self.actions}
 
     def _get_state(self, current, best, no_improve):
-        # 1. Quality Gap 
+        # 1. Quality Gap (2 Buckets)
         best_ref = max(1.0, abs(best.fitness))
         gap = max(0.0, (current.fitness - best.fitness) / best_ref)
         gap_bucket = "near_best" if gap <= 0.01 else "large_gap"
@@ -464,8 +464,6 @@ class ALNS_AOS:
         else:
             stagnation_bucket = "stagnated"
 
-        # Note: We completely remove the 'size_bucket' because problem size is 
-        # constant during any single run and does not provide dynamic context.
         return (gap_bucket, temp_bucket, stagnation_bucket)
 
     def _select_action(self, state):
@@ -485,14 +483,6 @@ class ALNS_AOS:
         return random.choice(best_actions), "exploit"
 
     def _compute_reward(self, candidate, current, best, accepted):
-        """
-        Exact reward signal for Q-learning.
-
-        Important:
-            This reward uses the full Decoder.evaluate(...) fitness.
-            The Q-table therefore learns which destroy/repair pairs improve
-            the true objective, including setups and tool replacement effects.
-        """
         if candidate.fitness < best.fitness:
             base = 10.0
             reference = max(1.0, abs(best.fitness))
