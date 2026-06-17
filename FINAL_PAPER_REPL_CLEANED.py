@@ -19,7 +19,6 @@ MAX_TIME_SECONDS = 3600.0
 SETUP_TIME = 1.0
 THETA_M = 72.0
 
-
 def export_seed_results_to_excel(output_path, **sheets):
     if not output_path:
         return None
@@ -707,10 +706,6 @@ def run_exact_paper_replications(num_runs=20, output_excel="paper_replication_se
                 case_file = path
                 break
                 
-        if not case_file:
-            print(f"Skipping baseline verification for {case_name}: Target CSV file missing.")
-            continue
-            
         case_ops, m_case, c_case = load_actual_kmwe_instance(case_file)
         ph_objectives, mh_objectives = [], []
         ph_times, mh_times = [], []
@@ -775,54 +770,5 @@ def run_exact_paper_replications(num_runs=20, output_excel="paper_replication_se
     )
     return table8_summary_df, table8_seed_df, table14_summary_df, table14_seed_df
 
-# Compare standard vs. extended stagnation limits to check for premature stops
-def run_no_premature_stop_check(
-    case_file,
-    seed=0,
-    max_time_seconds=MAX_TIME_SECONDS,
-    normal_no_improvement_limit=NO_IMPROVEMENT_LIMIT,
-    extended_no_improvement_limit=10**9,
-    export_prefix="mh_verification",
-):
-
-    case_ops, m_case, c_case = load_actual_kmwe_instance(case_file)
-
-    results = []
-    for label, gilimit in [
-        ("paper_stop", normal_no_improvement_limit),
-        ("extended_stop_check", extended_no_improvement_limit),
-    ]:
-        random.seed(seed)
-        np.random.seed(seed)
-        mh_eng = Matheuristic(case_ops, num_machines=m_case, magazine_capacity=c_case)
-        res = mh_eng.run(
-            max_time_seconds=max_time_seconds,
-            no_improvement_limit=gilimit,
-            max_generations=None,
-            record_history=True,
-            verbose=False,
-        )
-
-        history_df = pd.DataFrame(res.history)
-        history_path = f"{export_prefix}_{label}_seed{seed}.csv"
-        history_df.to_csv(history_path, index=False)
-
-        results.append({
-            "mode": label,
-            "seed": seed,
-            "fitness": res.fitness,
-            "tardiness": res.tardiness,
-            "setups": res.setups,
-            "runtime_seconds": res.runtime,
-            "generations": res.generations,
-            "stop_reason": res.stop_reason,
-            "history_csv": history_path,
-        })
-
-    summary = pd.DataFrame(results)
-    print(summary.to_string(index=False))
-    return summary
-
-if __name__ == "__main__":
-    run_exact_paper_replications(num_runs=10)
+run_exact_paper_replications(num_runs=10)
     
