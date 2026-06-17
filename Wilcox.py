@@ -15,7 +15,7 @@ files = {
     "ALNS_Q_learning": "ALNS_q_learn.xlsx",
 }
 
-output_file = "wilcoxon_case_means_runtime_ARPD_no_paper100.xlsx"
+output_file = "ALL_results.xlsx"
 
 # =========================
 # COLUMN RULES
