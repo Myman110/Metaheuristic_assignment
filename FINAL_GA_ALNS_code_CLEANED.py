@@ -1238,7 +1238,7 @@ def run_ph_mh_alns_aos_on_file(case_file, seed=0, mh_time_seconds=MAX_TIME_SECON
         "ga_archive": ga_archive,
     }
 
-def run_hybrid_experiments(case_files, seeds=range(10), output_prefix="hybrid_ph_mh_alns_aos_results", show_progress=True, **kwargs):
+def run_hybrid_experiments(case_files, seeds=range(10), show_progress=True, **kwargs):
     all_summaries = []
     all_start_rows = []
     case_iterator = tqdm(list(case_files), desc="Cases", disable=not show_progress)
@@ -1412,7 +1412,7 @@ def _enrich_summary_with_best_alns_metadata(summary, objects):
     summary["Hybrid_ALNS_stop_reason"] = getattr(best_hybrid, "alns_stop", "unknown")
     return summary
 
-def run_hybrid_table8_replications(num_runs=10, output_prefix="hybrid_table8", mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True, verbose=False):
+def run_hybrid_table8_replications(num_runs=10, mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True, verbose=False):
     print("\n[EXACT REPLICATION: TABLE 8 - Operational Scaling Framework on 6M140]")
     case_file = resolve_kmwe_case_file("6M140")
     full_jobs_data, m_val, c_val = load_actual_kmwe_instance(case_file)
@@ -1464,8 +1464,8 @@ def run_hybrid_table14_replications(num_runs=10, case_names=("2M38", "2M46", "6M
 
 def run_exact_hybrid_replications(num_runs=10, mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True, verbose=False, output_excel="hybrid_ph_mh_alns_seed_results.xlsx"):
     print(f" REPLICATING EXACT TABLES ({num_runs} SEED SAMPLES) ")
-    table8_summary, table8_runs, table8_starts = run_hybrid_table8_replications(num_runs=num_runs, output_prefix="hybrid_table8", mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, show_progress=show_progress, verbose=verbose)
-    table14_summary, table14_runs, table14_starts = run_hybrid_table14_replications(num_runs=num_runs, output_prefix="hybrid_table14", mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, show_progress=show_progress, verbose=verbose)
+    table8_summary, table8_runs, table8_starts = run_hybrid_table8_replications(num_runs=num_runs, mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, show_progress=show_progress, verbose=verbose)
+    table14_summary, table14_runs, table14_starts = run_hybrid_table14_replications(num_runs=num_runs, mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, show_progress=show_progress, verbose=verbose)
     export_seed_results_to_excel(output_excel, table8_summary=table8_summary, table8_seed_results=table8_runs, table8_alns_starts=table8_starts, table14_summary=table14_summary, table14_seed_results=table14_runs, table14_alns_starts=table14_starts)
     return {"table8_summary": table8_summary, "table8_runs": table8_runs, "table8_starts": table8_starts, "table14_summary": table14_summary, "table14_runs": table14_runs, "table14_starts": table14_starts}
 
