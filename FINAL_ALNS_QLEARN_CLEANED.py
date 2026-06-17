@@ -40,38 +40,31 @@ def export_seed_results_to_excel(output_path, **sheets):
     return output_path
 
 def solve_trm_ilp_exact(tools_in_magazine, tool_sizes, scores, needed_capacity):
-    """Solves the Tool Replacement Method subproblem using an exact binary ILP."""
+    """
+    solve trm with enumaration of all subsets of tools in the magazine, and return the best subset to remove.
+    """
     if needed_capacity <= 0:
         return []
-    tools = list(tools_in_magazine)
-    if not tools:
-        return []
 
-    c = np.array([float(scores.get(t, 0.0)) for t in tools], dtype=float)
-    sizes = np.array([float(tool_sizes[t]) for t in tools], dtype=float)
+    tools = sorted(list(tools_in_magazine))
+    n = len(tools)
+    best_key = None
+    best_subset = []
 
-    constraints = LinearConstraint(
-        A=sizes.reshape(1, -1),
-        lb=np.array([float(needed_capacity)]),
-        ub=np.array([np.inf]),
-    )
+    for mask in range(1, 1 << n):
+        subset = [tools[i] for i in range(n) if mask & (1 << i)]
+        freed_capacity = sum(tool_sizes[t] for t in subset)
+        if freed_capacity < needed_capacity:
+            continue
 
-    bounds = Bounds(lb=np.zeros(len(tools)), ub=np.ones(len(tools)))
-    integrality = np.ones(len(tools), dtype=int)
+        objective = sum(scores.get(t, 0) for t in subset)
+        key = (objective, freed_capacity, len(subset), tuple(subset))
+        if best_key is None or key < best_key:
+            best_key = key
+            best_subset = subset
 
-    result = milp(
-        c=c,
-        integrality=integrality,
-        bounds=bounds,
-        constraints=constraints,
-        options={"disp": False},
-    )
+    return best_subset
 
-    if not result.success:
-        raise RuntimeError(f"TRM ILP failed to solve: {result.message}")
-
-    lambdas = np.rint(result.x).astype(int)
-    return [t for t, selected in zip(tools, lambdas) if selected == 1]
 
 def solve_trm_knapsack(tools_in_magazine, tool_sizes, scores, needed_capacity):
     return solve_trm_ilp_exact(tools_in_magazine, tool_sizes, scores, needed_capacity)

@@ -3,7 +3,6 @@ import random
 import time
 import numpy as np
 import pandas as pd
-from scipy.optimize import milp, LinearConstraint, Bounds
 
 # Global lookup for tool sizing dependencies
 GLOBAL_TOOL_SIZES = {}
@@ -18,7 +17,6 @@ NO_IMPROVEMENT_LIMIT = 20
 MAX_TIME_SECONDS = 3600.0
 SETUP_TIME = 1.0
 THETA_M = 72.0
-
 
 def export_seed_results_to_excel(output_path, **sheets):
     if not output_path:
@@ -40,38 +38,30 @@ def export_seed_results_to_excel(output_path, **sheets):
     return output_path
 
 def solve_trm_ilp_exact(tools_in_magazine, tool_sizes, scores, needed_capacity):
-    """Solves the Tool Replacement Method subproblem using an exact binary ILP."""
+    """
+    solve trm with enumaration of all subsets of tools in the magazine, and return the best subset to remove.
+    """
     if needed_capacity <= 0:
         return []
-    tools = list(tools_in_magazine)
-    if not tools:
-        return []
 
-    c = np.array([float(scores.get(t, 0.0)) for t in tools], dtype=float)
-    sizes = np.array([float(tool_sizes[t]) for t in tools], dtype=float)
+    tools = sorted(list(tools_in_magazine))
+    n = len(tools)
+    best_key = None
+    best_subset = []
 
-    constraints = LinearConstraint(
-        A=sizes.reshape(1, -1),
-        lb=np.array([float(needed_capacity)]),
-        ub=np.array([np.inf]),
-    )
+    for mask in range(1, 1 << n):
+        subset = [tools[i] for i in range(n) if mask & (1 << i)]
+        freed_capacity = sum(tool_sizes[t] for t in subset)
+        if freed_capacity < needed_capacity:
+            continue
 
-    bounds = Bounds(lb=np.zeros(len(tools)), ub=np.ones(len(tools)))
-    integrality = np.ones(len(tools), dtype=int)
+        objective = sum(scores.get(t, 0) for t in subset)
+        key = (objective, freed_capacity, len(subset), tuple(subset))
+        if best_key is None or key < best_key:
+            best_key = key
+            best_subset = subset
 
-    result = milp(
-        c=c,
-        integrality=integrality,
-        bounds=bounds,
-        constraints=constraints,
-        options={"disp": False},
-    )
-
-    if not result.success:
-        raise RuntimeError(f"TRM ILP failed to solve: {result.message}")
-
-    lambdas = np.rint(result.x).astype(int)
-    return [t for t, selected in zip(tools, lambdas) if selected == 1]
+    return best_subset
 
 def solve_trm_knapsack(tools_in_magazine, tool_sizes, scores, needed_capacity):
     return solve_trm_ilp_exact(tools_in_magazine, tool_sizes, scores, needed_capacity)
@@ -611,7 +601,7 @@ def load_actual_kmwe_instance(filepath):
         
     return jobs_data, num_machines, magazine_capacity
 
-def run_exact_paper_replications(num_runs=20, output_excel="paper_replication_seed_results.xlsx"):
+def run_exact_paper_replications(num_runs=20, output_excel="paper_replication_seed_results_enum.xlsx"):
     print("\n Running Table 8")
     
     # Find 6M140 file 
@@ -706,10 +696,6 @@ def run_exact_paper_replications(num_runs=20, output_excel="paper_replication_se
             if os.path.exists(path):
                 case_file = path
                 break
-                
-        if not case_file:
-            print(f"Skipping baseline verification for {case_name}: Target CSV file missing.")
-            continue
             
         case_ops, m_case, c_case = load_actual_kmwe_instance(case_file)
         ph_objectives, mh_objectives = [], []
@@ -775,54 +761,5 @@ def run_exact_paper_replications(num_runs=20, output_excel="paper_replication_se
     )
     return table8_summary_df, table8_seed_df, table14_summary_df, table14_seed_df
 
-# Compare standard vs. extended stagnation limits to check for premature stops
-def run_no_premature_stop_check(
-    case_file,
-    seed=0,
-    max_time_seconds=MAX_TIME_SECONDS,
-    normal_no_improvement_limit=NO_IMPROVEMENT_LIMIT,
-    extended_no_improvement_limit=10**9,
-    export_prefix="mh_verification",
-):
-
-    case_ops, m_case, c_case = load_actual_kmwe_instance(case_file)
-
-    results = []
-    for label, gilimit in [
-        ("paper_stop", normal_no_improvement_limit),
-        ("extended_stop_check", extended_no_improvement_limit),
-    ]:
-        random.seed(seed)
-        np.random.seed(seed)
-        mh_eng = Matheuristic(case_ops, num_machines=m_case, magazine_capacity=c_case)
-        res = mh_eng.run(
-            max_time_seconds=max_time_seconds,
-            no_improvement_limit=gilimit,
-            max_generations=None,
-            record_history=True,
-            verbose=False,
-        )
-
-        history_df = pd.DataFrame(res.history)
-        history_path = f"{export_prefix}_{label}_seed{seed}.csv"
-        history_df.to_csv(history_path, index=False)
-
-        results.append({
-            "mode": label,
-            "seed": seed,
-            "fitness": res.fitness,
-            "tardiness": res.tardiness,
-            "setups": res.setups,
-            "runtime_seconds": res.runtime,
-            "generations": res.generations,
-            "stop_reason": res.stop_reason,
-            "history_csv": history_path,
-        })
-
-    summary = pd.DataFrame(results)
-    print(summary.to_string(index=False))
-    return summary
-
-if __name__ == "__main__":
-    run_exact_paper_replications(num_runs=10)
+run_exact_paper_replications(num_runs=10)
     
