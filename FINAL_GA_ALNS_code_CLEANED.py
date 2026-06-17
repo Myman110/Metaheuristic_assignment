@@ -32,16 +32,16 @@ def export_seed_results_to_excel(path, **sheets):
     return path
 
 # Settings
-P_B = 1
-P_POP = 100
-P_ELITE = 0.10
-P_MUT_UNI = 0.01
-P_MUT_SW = 0.01
-P_TOURN = 0.20
-P_STAGN = 20
-P_MAX_T = 3600.0
-P_SU = 1.0
-P_THETA = 72.0
+B = 1
+POP_SIZE = 100
+ELITISM_RATE = 0.10
+UNIFORM_MUTATION_PROB = 0.01
+SWAP_MUTATION_PROB = 0.01
+TOURNAMENT_RATE = 0.20
+NO_IMPROVEMENT_LIMIT = 20
+MAX_TIME_SECONDS = 3600.0
+SETUP_TIME = 1.0
+THETA_M = 72.0
 
 def trm_solve(mag, sizes, scores, req):
     if req <= 0:
@@ -61,9 +61,6 @@ def trm_solve(mag, sizes, scores, req):
             best_k = k
             best_sub = sub
     return best_sub
-
-def solve_trm_knapsack(mag, sizes, scores, req):
-    return trm_solve(mag, sizes, scores, req)
 
 class Ind:
     def __init__(self, jv, mv):
@@ -178,7 +175,7 @@ class Dec:
         ind.su_pos = su_pos
 
 class PracHeur:
-    def __init__(self, ops, num_m, cap, tau=P_SU, theta=P_THETA):
+    def __init__(self, ops, num_m, cap, tau=SETUP_TIME, theta=THETA_M):
         self.O = ops
         self.M = list(range(1, num_m + 1))
         self.C = cap
@@ -658,9 +655,9 @@ def run_alns_only_on_file(case_file, seed=0, alns_time_seconds=600.0, alns_itera
         ops_by_job.setdefault(jid, []).append(op)
     for jid in ops_by_job:
         ops_by_job[jid].sort(key=lambda x: x["op_id"])
-    decoder = Dec(ops_by_job, m_case, c_case, P_SU)
+    decoder = Dec(ops_by_job, m_case, c_case, SETUP_TIME)
     decoder.eval_ind(ph_solution)
-    alns_engine = Alns(jobs_data, m_case, c_case, P_SU)
+    alns_engine = Alns(jobs_data, m_case, c_case, SETUP_TIME)
     alns_solution = alns_engine.run(ph_solution, max_t=alns_time_seconds, max_it=alns_iterations, stagn=alns_no_improvement_limit, record_h=True, verbose=verbose, show_pr=show_progress, pr_desc=f"ALNS {seed}")
     decoder.eval_ind(alns_solution)
     result = {
@@ -684,9 +681,7 @@ def run_alns_only_on_file(case_file, seed=0, alns_time_seconds=600.0, alns_itera
     return alns_solution, result
 
 def run_alns_table8_replications(num_runs=10, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500):
-    print("\n" + "=" * 120)
-    print(f" ALNS-ONLY TABLE 8 ENGINE SAMPLES ({num_runs} RUNS) ".center(120, "#"))
-    print("=" * 120)
+    print(f" ALNS-ONLY TABLE 8 ({num_runs} RUNS) ")
     case_file = resolve_kmwe_case_file("6M140")
     full_jobs_data, m_val, c_val = load_actual_kmwe_instance(case_file)
     df_sorted = pd.DataFrame(full_jobs_data).sort_values(by="r").copy()
@@ -710,9 +705,9 @@ def run_alns_table8_replications(num_runs=10, alns_time_seconds=600.0, alns_iter
                 ops_by_job.setdefault(jid, []).append(op)
             for jid in ops_by_job:
                 ops_by_job[jid].sort(key=lambda x: x["op_id"])
-            decoder = Dec(ops_by_job, m_val, c_val, P_SU)
+            decoder = Dec(ops_by_job, m_val, c_val, SETUP_TIME)
             decoder.eval_ind(ph_solution)
-            alns_engine = Alns(sliced_ops, m_val, c_val, P_SU)
+            alns_engine = Alns(sliced_ops, m_val, c_val, SETUP_TIME)
             alns_solution = alns_engine.run(ph_solution, max_t=alns_time_seconds, max_it=alns_iterations, stagn=alns_no_improvement_limit, record_h=True, verbose=False)
             decoder.eval_ind(alns_solution)
             records.append({
@@ -743,9 +738,7 @@ def run_alns_table8_replications(num_runs=10, alns_time_seconds=600.0, alns_iter
     return summary
 
 def run_alns_only_replications(num_runs=10, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500):
-    print("=" * 120)
-    print(f" ALNS ENGINE SAMPLES ({num_runs} RUNS) ".center(120, "#"))
-    print("=" * 120)
+    print(f" ALNS SAMPLES ({num_runs} RUNS) ")
     rows = []
     for case_name in ["2M38", "2M46", "6M140", "6M163"]:
         case_file = resolve_kmwe_case_file(case_name)
@@ -849,7 +842,7 @@ def pox_mach_build(job_vector, ops_by_job, num_machines, magazine_capacity):
     return mach_vec
 
 class MathGA:
-    def __init__(self, jobs_data, num_m, cap, setup_time=P_SU):
+    def __init__(self, jobs_data, num_m, cap, setup_time=SETUP_TIME):
         self.num_m = num_m
         self.C = cap
         self.tau = setup_time
@@ -864,7 +857,7 @@ class MathGA:
             self.ops_by_j[job_id].sort(key=lambda x: x["op_id"])
         self.decoder = Dec(self.ops_by_j, self.num_m, self.C, self.tau)
 
-    def run(self, max_time_seconds=P_MAX_T, no_improvement_limit=P_STAGN, pop_size=P_POP, tournament_rate=P_TOURN, elitism_rate=P_ELITE, swap_mutation_prob=P_MUT_SW, uniform_mutation_prob=P_MUT_UNI, pox_iterations=P_B, max_generations=None, record_history=True, verbose=False):
+    def run(self, max_time_seconds=MAX_TIME_SECONDS, no_improvement_limit=NO_IMPROVEMENT_LIMIT, pop_size=POP_SIZE, tournament_rate=TOURNAMENT_RATE, elitism_rate=ELITISM_RATE, swap_mutation_prob=SWAP_MUTATION_PROB, uniform_mutation_prob=UNIFORM_MUTATION_PROB, pox_iterations=B, max_generations=None, record_history=True, verbose=False):
         population = []
         ph_engine = PracHeur(self.jobs_data, self.num_m, self.C, self.tau)
         ph_baseline = ph_engine.run()
@@ -1006,12 +999,6 @@ def clone_individual(ind):
             setattr(new, attr, getattr(ind, attr))
     return new
 
-def individual_distance(a, b):
-    n = max(1, len(a.jv))
-    job_diff = sum(x != y for x, y in zip(a.jv, b.jv)) / n
-    mach_diff = sum(x != y for x, y in zip(a.mv, b.mv)) / n
-    return 0.5 * job_diff + 0.5 * mach_diff
-
 def unique_sorted_individuals(individuals):
     unique = {}
     for ind in individuals:
@@ -1019,37 +1006,6 @@ def unique_sorted_individuals(individuals):
         if sig not in unique or ind.fit < unique[sig].fit:
             unique[sig] = clone_individual(ind)
     return sorted(unique.values(), key=lambda x: (x.fit, x.tard, x.su))
-
-def select_three_diverse_ga_solutions(archive, k=3, near_best_gap=0.10, min_candidate_pool=25):
-    ranked = unique_sorted_individuals(archive)
-    if not ranked:
-        raise ValueError("Cannot select GA solutions: archive is empty.")
-    best = ranked[0]
-    threshold = best.fit + max(abs(best.fit) * near_best_gap, 1e-9)
-    pool = [ind for ind in ranked if ind.fit <= threshold]
-    if len(pool) < k:
-        pool = ranked[:max(k, min(min_candidate_pool, len(ranked)))]
-    chosen = [clone_individual(best)]
-    while len(chosen) < min(k, len(pool)):
-        best_candidate = None
-        best_key = None
-        for cand in pool:
-            if cand.sig() in {c.sig() for c in chosen}:
-                continue
-            min_dist = min(individual_distance(cand, c) for c in chosen)
-            key = (min_dist, -cand.fit, -cand.tard, -cand.su)
-            if best_key is None or key > best_key:
-                best_key = key
-                best_candidate = cand
-        if best_candidate is None:
-            break
-        copied = clone_individual(best_candidate)
-        copied.source_diversity = float(best_key[0])
-        chosen.append(copied)
-    for idx, ind in enumerate(chosen, start=1):
-        ind.source_rank = idx
-        ind.source_label = "GA_best" if idx == 1 else f"GA_diverse_{idx}"
-    return chosen
 
 def select_best_ga_solution(archive):
     ranked = unique_sorted_individuals(archive)
@@ -1062,7 +1018,7 @@ def select_best_ga_solution(archive):
     return [best]
 
 class MatheuristicWithArchive(MathGA):
-    def run_with_archive(self, max_time_seconds=P_MAX_T, no_improvement_limit=P_STAGN, pop_size=P_POP, tournament_rate=P_TOURN, elitism_rate=P_ELITE, swap_mutation_prob=P_MUT_SW, uniform_mutation_prob=P_MUT_UNI, pox_iterations=P_B, max_generations=None, record_history=True, verbose=False, archive_top_per_generation=25, show_progress=False, progress_desc="GA/MH"):
+    def run_with_archive(self, max_time_seconds=MAX_TIME_SECONDS, no_improvement_limit=NO_IMPROVEMENT_LIMIT, pop_size=POP_SIZE, tournament_rate=TOURNAMENT_RATE, elitism_rate=ELITISM_RATE, swap_mutation_prob=SWAP_MUTATION_PROB, uniform_mutation_prob=UNIFORM_MUTATION_PROB, pox_iterations=B, max_generations=None, record_history=True, verbose=False, archive_top_per_generation=25, show_progress=False, progress_desc="GA/MH"):
         population = []
         archive = []
         ph_engine = PracHeur(self.jobs_data, self.num_m, self.C, self.tau)
@@ -1192,12 +1148,12 @@ def build_ops_by_job(jobs_data):
         ops_by_job[job_id].sort(key=lambda x: x["op_id"])
     return ops_by_job
 
-def run_ph_mh_alns_aos_on_file(case_file, seed=0, mh_time_seconds=P_MAX_T, mh_no_improvement_limit=P_STAGN, mh_pop_size=P_POP, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, near_best_gap=0.10, num_alns_starts=1, reset_seed_per_alns_start=True, verbose=False, show_progress=True):
+def run_ph_mh_alns_aos_on_file(case_file, seed=0, mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, reset_seed_per_alns_start=True, verbose=False, show_progress=True):
     random.seed(seed)
     np.random.seed(seed)
     jobs_data, m_case, c_case = load_actual_kmwe_instance(case_file)
     ops_by_job = build_ops_by_job(jobs_data)
-    decoder = Dec(ops_by_job, m_case, c_case, P_SU)
+    decoder = Dec(ops_by_job, m_case, c_case, SETUP_TIME)
     t0 = time.time()
     ph_engine = PracHeur(jobs_data, m_case, c_case)
     ph_solution = ph_engine.run()
@@ -1218,7 +1174,7 @@ def run_ph_mh_alns_aos_on_file(case_file, seed=0, mh_time_seconds=P_MAX_T, mh_no
         decoder.eval_ind(start_ind)
         if show_progress:
             start_iterator.set_postfix(start=getattr(start_ind, "source_label", f"GA_start_{idx}"), fit=round(float(start_ind.fit), 2))
-        alns_engine = Alns(jobs_data, m_case, c_case, P_SU)
+        alns_engine = Alns(jobs_data, m_case, c_case, SETUP_TIME)
         alns_solution = alns_engine.run(start_ind, max_it=alns_iterations, max_t=alns_time_seconds, stagn=alns_no_improvement_limit, record_h=True, show_pr=show_progress, pr_desc=f"ALNS seed={seed} start={idx}/{len(starts)}")
         decoder.eval_ind(alns_solution)
         alns_solution.start_label = getattr(start_ind, "source_label", f"GA_start_{idx}")
@@ -1304,26 +1260,13 @@ def run_hybrid_experiments(case_files, seeds=range(10), output_prefix="hybrid_ph
     print(summary_df.to_string(index=False))
     return summary_df, starts_df
 
-def run_ph_ga_mh_alns_ilp_on_file(*args, **kwargs):
-    return run_ph_mh_alns_aos_on_file(*args, **kwargs)
-
-def run_ph_ga_mh_alns_ilp_on_jobs_data(*args, **kwargs):
-    return run_ph_mh_alns_aos_on_jobs_data(*args, **kwargs)
-
-def run_strict_hybrid_experiments(*args, **kwargs):
-    return run_hybrid_experiments(*args, **kwargs)
-
-def _prepare_jobs_data_cache(jobs_data):
-    TL_SIZES.clear()
-    for op in jobs_data:
-        TL_SIZES[op["tool_set"]] = op["size"]
-
-def run_ph_mh_alns_aos_on_jobs_data(jobs_data, num_machines, magazine_capacity, case_label="custom_instance", seed=0, mh_time_seconds=P_MAX_T, mh_no_improvement_limit=P_STAGN, mh_pop_size=P_POP, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, near_best_gap=0.10, num_alns_starts=1, reset_seed_per_alns_start=True, verbose=False, show_progress=True):
+def run_ph_mh_alns_aos_on_jobs_data(jobs_data, num_machines, magazine_capacity, case_label="custom_instance", seed=0, mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, reset_seed_per_alns_start=True, verbose=False, show_progress=True):
     random.seed(seed)
     np.random.seed(seed)
-    _prepare_jobs_data_cache(jobs_data)
+    TL_SIZES.clear()
+    TL_SIZES.update({op["tool_set"]: op["size"] for op in jobs_data})
     ops_by_job = build_ops_by_job(jobs_data)
-    decoder = Dec(ops_by_job, num_machines, magazine_capacity, P_SU)
+    decoder = Dec(ops_by_job, num_machines, magazine_capacity, SETUP_TIME)
     t0 = time.time()
     ph_engine = PracHeur(jobs_data, num_machines, magazine_capacity)
     ph_solution = ph_engine.run()
@@ -1344,7 +1287,7 @@ def run_ph_mh_alns_aos_on_jobs_data(jobs_data, num_machines, magazine_capacity, 
         decoder.eval_ind(start_ind)
         if show_progress:
             start_iterator.set_postfix(start=getattr(start_ind, "source_label", f"GA_start_{idx}"), fit=round(float(start_ind.fit), 2))
-        alns_engine = Alns(jobs_data, num_machines, magazine_capacity, P_SU)
+        alns_engine = Alns(jobs_data, num_machines, magazine_capacity, SETUP_TIME)
         alns_solution = alns_engine.run(start_ind, max_it=alns_iterations, max_t=alns_time_seconds, stagn=alns_no_improvement_limit, record_h=True, show_pr=show_progress, pr_desc=f"ALNS {case_label} seed={seed} start={idx}/{len(starts)}")
         decoder.eval_ind(alns_solution)
         alns_solution.start_label = getattr(start_ind, "source_label", f"GA_start_{idx}")
@@ -1469,7 +1412,7 @@ def _enrich_summary_with_best_alns_metadata(summary, objects):
     summary["Hybrid_ALNS_stop_reason"] = getattr(best_hybrid, "alns_stop", "unknown")
     return summary
 
-def run_hybrid_table8_replications(num_runs=10, output_prefix="hybrid_table8", mh_time_seconds=P_MAX_T, mh_no_improvement_limit=P_STAGN, mh_pop_size=P_POP, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, near_best_gap=0.10, num_alns_starts=1, show_progress=True, verbose=False):
+def run_hybrid_table8_replications(num_runs=10, output_prefix="hybrid_table8", mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True, verbose=False):
     print("\n[EXACT REPLICATION: TABLE 8 - Operational Scaling Framework on 6M140]")
     case_file = resolve_kmwe_case_file("6M140")
     full_jobs_data, m_val, c_val = load_actual_kmwe_instance(case_file)
@@ -1483,11 +1426,9 @@ def run_hybrid_table8_replications(num_runs=10, output_prefix="hybrid_table8", m
         sliced_ops = df_sorted.head(n_slice).to_dict(orient="records")
         seed_iterator = tqdm(range(num_runs), desc=f"Seeds n={n_slice}", leave=False, disable=not show_progress)
         for seed in seed_iterator:
-            if show_progress:
-                tqdm.write(f"Table 8 | n={n_slice} | seed={seed}")
             random.seed(int(seed))
             np.random.seed(int(seed))
-            summary, starts, objects = run_ph_mh_alns_aos_on_jobs_data(sliced_ops, num_machines=m_val, magazine_capacity=c_val, case_label=f"6M140_n{n_slice}", seed=int(seed), mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, near_best_gap=near_best_gap, num_alns_starts=num_alns_starts, verbose=verbose, show_progress=show_progress)
+            summary, starts, objects = run_ph_mh_alns_aos_on_jobs_data(sliced_ops, num_machines=m_val, magazine_capacity=c_val, case_label=f"6M140_n{n_slice}", seed=int(seed), mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, verbose=verbose, show_progress=show_progress)
             summary = _enrich_summary_with_best_alns_metadata(summary, objects)
             summary["n"] = n_slice
             for row in starts:
@@ -1498,25 +1439,19 @@ def run_hybrid_table8_replications(num_runs=10, output_prefix="hybrid_table8", m
     print(summary_df.to_string(index=False))
     return summary_df, pd.DataFrame(run_records), pd.DataFrame(start_records)
 
-def run_hybrid_table14_replications(num_runs=10, output_prefix="hybrid_table14", case_names=("2M38", "2M46", "6M140", "6M163"), mh_time_seconds=P_MAX_T, mh_no_improvement_limit=P_STAGN, mh_pop_size=P_POP, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, near_best_gap=0.10, num_alns_starts=1, show_progress=True, verbose=False):
+def run_hybrid_table14_replications(num_runs=10, case_names=("2M38", "2M46", "6M140", "6M163"), mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True, verbose=False):
     print("\n[EXACT REPLICATION: TABLE 14 - Production Base-Case Workcenters]")
     run_records = []
     start_records = []
     case_iterator = tqdm(list(case_names), desc="Table 14 cases", disable=not show_progress)
     for case_name in case_iterator:
         case_iterator.set_postfix(case=case_name)
-        try:
-            case_file = resolve_kmwe_case_file(case_name)
-        except FileNotFoundError:
-            print(f"Skipping baseline verification for {case_name}: Target CSV file missing.")
-            continue
+        case_file = resolve_kmwe_case_file(case_name)
         seed_iterator = tqdm(range(num_runs), desc=f"Seeds {case_name}", leave=False, disable=not show_progress)
         for seed in seed_iterator:
-            if show_progress:
-                tqdm.write(f"Table 14 | case={case_name} | seed={seed}")
             random.seed(int(seed))
             np.random.seed(int(seed))
-            summary, starts, objects = run_ph_mh_alns_aos_on_file(case_file=case_file, seed=int(seed), mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, near_best_gap=near_best_gap, num_alns_starts=num_alns_starts, verbose=verbose, show_progress=show_progress)
+            summary, starts, objects = run_ph_mh_alns_aos_on_file(case_file=case_file, seed=int(seed), mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, verbose=verbose, show_progress=show_progress)
             summary = _enrich_summary_with_best_alns_metadata(summary, objects)
             summary["BaseCase"] = case_name
             for row in starts:
@@ -1527,12 +1462,10 @@ def run_hybrid_table14_replications(num_runs=10, output_prefix="hybrid_table14",
     print(summary_df.to_string(index=False))
     return summary_df, pd.DataFrame(run_records), pd.DataFrame(start_records)
 
-def run_exact_hybrid_replications(num_runs=10, mh_time_seconds=P_MAX_T, mh_no_improvement_limit=P_STAGN, mh_pop_size=P_POP, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, near_best_gap=0.10, num_alns_starts=1, show_progress=True, verbose=False, output_excel="hybrid_ph_mh_alns_seed_results.xlsx"):
-    print("=" * 110)
-    print(f" TRUE EXPERIMENTAL ENGINE: REPLICATING EXACT TABLES ({num_runs} SEED SAMPLES) ".center(110, "#"))
-    print("=" * 110)
-    table8_summary, table8_runs, table8_starts = run_hybrid_table8_replications(num_runs=num_runs, output_prefix="hybrid_table8", mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, near_best_gap=near_best_gap, num_alns_starts=num_alns_starts, show_progress=show_progress, verbose=verbose)
-    table14_summary, table14_runs, table14_starts = run_hybrid_table14_replications(num_runs=num_runs, output_prefix="hybrid_table14", mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, near_best_gap=near_best_gap, num_alns_starts=num_alns_starts, show_progress=show_progress, verbose=verbose)
+def run_exact_hybrid_replications(num_runs=10, mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True, verbose=False, output_excel="hybrid_ph_mh_alns_seed_results.xlsx"):
+    print(f" REPLICATING EXACT TABLES ({num_runs} SEED SAMPLES) ")
+    table8_summary, table8_runs, table8_starts = run_hybrid_table8_replications(num_runs=num_runs, output_prefix="hybrid_table8", mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, show_progress=show_progress, verbose=verbose)
+    table14_summary, table14_runs, table14_starts = run_hybrid_table14_replications(num_runs=num_runs, output_prefix="hybrid_table14", mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, show_progress=show_progress, verbose=verbose)
     export_seed_results_to_excel(output_excel, table8_summary=table8_summary, table8_seed_results=table8_runs, table8_alns_starts=table8_starts, table14_summary=table14_summary, table14_seed_results=table14_runs, table14_alns_starts=table14_starts)
     return {"table8_summary": table8_summary, "table8_runs": table8_runs, "table8_starts": table8_starts, "table14_summary": table14_summary, "table14_runs": table14_runs, "table14_starts": table14_starts}
 
@@ -1540,4 +1473,4 @@ def run_exact_paper_replications(num_runs=10, output_excel="hybrid_ph_mh_alns_se
     return run_exact_hybrid_replications(num_runs=num_runs, output_excel=output_excel)
 
 
-run_exact_hybrid_replications(num_runs=10, mh_time_seconds=3600.0, mh_no_improvement_limit=P_STAGN, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True)
+run_exact_hybrid_replications(num_runs=10, mh_time_seconds=3600.0, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True)
