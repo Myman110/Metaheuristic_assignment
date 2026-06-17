@@ -8,14 +8,6 @@ from tqdm.auto import tqdm
 # Global lookup for tool sizing dependencies
 GLOBAL_TOOL_SIZES = {}
 
-B = 1
-POP_SIZE = 100
-ELITISM_RATE = 0.10
-UNIFORM_MUTATION_PROB = 0.01
-SWAP_MUTATION_PROB = 0.01
-TOURNAMENT_RATE = 0.20
-NO_IMPROVEMENT_LIMIT = 20
-MAX_TIME_SECONDS = 3600.0
 SETUP_TIME = 1.0
 THETA_M = 72.0
 
@@ -41,7 +33,7 @@ def export_seed_results_to_excel(output_path, **sheets):
 
 def solve_trm_ilp_exact(tools_in_magazine, tool_sizes, scores, needed_capacity):
     """
-    solve trm with enumaration of all subsets of tools in the magazine, and return the best subset to remove.
+    solve trm with enumeration of all subsets of tools in the magazine, and return the best subset to remove.
     """
     if needed_capacity <= 0:
         return []
@@ -65,7 +57,6 @@ def solve_trm_ilp_exact(tools_in_magazine, tool_sizes, scores, needed_capacity):
 
     return best_subset
 
-
 def solve_trm_knapsack(tools_in_magazine, tool_sizes, scores, needed_capacity):
     return solve_trm_ilp_exact(tools_in_magazine, tool_sizes, scores, needed_capacity)
 
@@ -76,9 +67,6 @@ class Individual:
         self.fitness = float('inf')
         self.tardiness = 0.0
         self.setups = 0
-
-    def get_signature(self):
-        return (tuple(self.job_vector), tuple(self.machine_vector))
 
 class Decoder:
     def __init__(self, ops_by_job, num_machines, magazine_capacity, setup_time=1.0):
@@ -144,7 +132,6 @@ class Decoder:
             t_ij = op_data['tool_set']
             phi_t = op_data['size']
             
-            # --- FIXED LINE HERE ---
             r_ij, p_ij, d_ij = op_data['r'], op_data['p'], op_data['d']
             
             succeeding_ops_per_machine[m_id].pop(0)
@@ -176,8 +163,6 @@ class Decoder:
                     zero_weight = sum(GLOBAL_TOOL_SIZES[t] for t in zero_score_tools)
                     
                     if zero_weight >= needed_space:
-                        # Paper Section 5.6: if score-0 tools can provide enough
-                        # capacity, remove those score-0 tools and skip the ILP.
                         for t in zero_score_tools:
                             T_m[m_id].remove(t)
                     else:
@@ -212,10 +197,6 @@ class Decoder:
         individual.setups = total_setups
         individual.fitness = total_tardiness + (self.tau * total_setups)
         individual.setup_positions = setup_positions
-
-
-
-# 3. PRACTITIONER HEURISTIC ENGINE
 
 class PractitionerHeuristic:
     def __init__(self, jobs_data, num_machines, magazine_capacity, tool_setup_time=SETUP_TIME, theta_m=THETA_M):
@@ -298,32 +279,7 @@ class PractitionerHeuristic:
         ind.fitness = total_tardiness + (self.tau * total_setups)
         return ind
 
-
-
-
-
-
-# 4. PH + ALNS + ITP/TRP WITH Q-LEARNING OPERATOR SELECTION
-
 class ALNS_AOS:
-    """
-    PH + ALNS + ITP/TRP improvement engine with Q-learning operator selection.
-
-    Terminology used here:
-        PH      = PractitionerHeuristic creates the initial solution.
-        ALNS    = destroy/repair neighborhood search over job order and machine assignment.
-        ITP/TRP = the tool-placement/replacement logic inside Decoder.evaluate(...).
-
-    Main difference from the previous AOS version:
-        - The destroy/repair pair is treated as a Q-learning action.
-        - Rewards are still computed from the exact Decoder.evaluate(...) objective.
-        - Therefore Q-learning learns from the real tardiness + setup + tool-replacement objective,
-          not from an approximation.
-
-    The exact decoder is kept in the loop, so final feasibility and reported objective remain
-    consistent with the tool-magazine replacement model.
-    """
-
     def __init__(
         self,
         jobs_data,
@@ -422,9 +378,7 @@ class ALNS_AOS:
         self.destroy_weights = {name: 1.0 for name in self.destroy_ops}
         self.repair_weights = {name: 1.0 for name in self.repair_ops}
 
-    # -----------------------------
-    # Basic utilities
-    # -----------------------------
+
     def clone(self, ind):
         new = Individual(ind.job_vector, ind.machine_vector)
         new.fitness = ind.fitness
@@ -443,10 +397,7 @@ class ALNS_AOS:
 
     def _evaluate(self, job_vec, mach_vec):
         """
-        Exact evaluation through Decoder.evaluate(...).
-
-        This still executes the tool-magazine / ITP-TRP logic, so Q-learning rewards,
-        acceptance decisions, and final reported objective are based on the exact model.
+        Q-learning rewards, acceptance decisions, and final reported objectives are based on the exact evaluation model.
         """
         key = (tuple(job_vec), tuple(mach_vec))
 
@@ -489,26 +440,13 @@ class ALNS_AOS:
         ]
         return partial_jobs, partial_machs, removed_jobs
 
-    # -----------------------------
-    # Q-learning utilities
-    # -----------------------------
+
     def _ensure_state(self, state):
         if state not in self.q_table:
             self.q_table[state] = {action: 0.0 for action in self.actions}
 
     def _get_state(self, current, best, no_improve):
-        """
-        Optimized, highly compact state representation for tabular Q-learning.
-        
-        Reduces the state space from 192 to 12 states (192 state-action pairs),
-        guaranteeing full convergence within a 2,000-iteration budget.
-        
-        Dimensions:
-            1. gap_bucket: 2 levels (near_best, large_gap)
-            2. temp_bucket: 2 levels (hot, cold)
-            3. stagnation_bucket: 3 levels (fresh, mild, stagnated)
-        """
-        # 1. Quality Gap (2 Buckets)
+        # 1. Quality Gap 
         best_ref = max(1.0, abs(best.fitness))
         gap = max(0.0, (current.fitness - best.fitness) / best_ref)
         gap_bucket = "near_best" if gap <= 0.01 else "large_gap"
@@ -589,11 +527,6 @@ class ALNS_AOS:
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
     def _refresh_operator_weights_from_q(self):
-        """
-        Convert Q-values into compatibility weights so old result summaries still work.
-
-        These are not used for operator selection. Q-learning uses q_table directly.
-        """
         destroy_scores = {name: [] for name in self.destroy_ops}
         repair_scores = {name: [] for name in self.repair_ops}
 
@@ -608,9 +541,6 @@ class ALNS_AOS:
         for r_name, values in repair_scores.items():
             self.repair_weights[r_name] = max(0.05, 1.0 + (float(np.mean(values)) if values else 0.0))
 
-    # -----------------------------
-    # Precedence-safe insertion logic
-    # -----------------------------
     def _op_index_for_next_insertion(self, partial_jobs, job_id):
         occ = partial_jobs.count(job_id)
 
@@ -717,9 +647,6 @@ class ALNS_AOS:
 
         return candidates
 
-    # -----------------------------
-    # Destroy operators
-    # -----------------------------
     def destroy_random_removal(self, individual, q):
         positions = random.sample(range(len(individual.job_vector)), q)
         return self._remove_positions(individual, positions)
@@ -792,9 +719,6 @@ class ALNS_AOS:
 
         return self._remove_positions(individual, positions)
 
-    # -----------------------------
-    # Repair operators
-    # -----------------------------
     def _best_single_insertion(
         self,
         partial_jobs,
@@ -989,9 +913,6 @@ class ALNS_AOS:
 
         return self._evaluate(current_jobs, current_machs)
 
-    # -----------------------------
-    # Main PH + ALNS + ITP/TRP loop with Q-learning
-    # -----------------------------
     def run(
         self,
         initial_solution,
@@ -1138,7 +1059,6 @@ class ALNS_AOS:
         best.alns_eval_cache_hits = self.eval_cache_hits
         best.alns_eval_cache_misses = self.eval_cache_misses
 
-        # Store a string-keyed copy so it is easier to serialize/inspect.
         best.alns_q_table = {
             str(state): {f"{a[0]}+{a[1]}": float(v) for a, v in values.items()}
             for state, values in self.q_table.items()
@@ -1146,24 +1066,10 @@ class ALNS_AOS:
 
         return best
 
-
-
-# REAL-WORLD DATA LOADER & PARSER
-
 def load_actual_kmwe_instance(filepath):
-    """
-    Parses the genuine KMWE data files by extracting metadata from the 
-    5-line header and properly building structured dictionaries.
-    """
     num_machines = 2
     magazine_capacity = 80
-    
-    if not os.path.exists(filepath):
-        raise FileNotFoundError(
-            f"KMWE CSV file not found: {filepath}. Synthetic/mock data is disabled."
-        )
 
-    # 1. Extract metadata from the 5-line header
     with open(filepath, 'r') as f:
         for _ in range(5):
             line = f.readline().strip()
@@ -1178,14 +1084,8 @@ def load_actual_kmwe_instance(filepath):
                 elif key == 'C':
                     magazine_capacity = int(value)
 
-    # 2. Read the structured operations block
     df = pd.read_csv(filepath, skiprows=5)
     expected_columns = ['job_id', 'op_id', 'r', 'p', 'd', 'tool_set', 'size']
-    if len(df.columns) != len(expected_columns):
-        raise ValueError(
-            f"Unexpected KMWE CSV format in {filepath}. "
-            f"Expected {len(expected_columns)} operation columns after the 5-line header."
-        )
     df.columns = expected_columns
 
     for col in expected_columns:
@@ -1193,8 +1093,6 @@ def load_actual_kmwe_instance(filepath):
 
     jobs_data = df.to_dict(orient='records')
 
-    # 3. Cache tool dimensions for the TRM solver. Clear first to avoid
-    # cross-case contamination when running multiple KMWE cases in one session.
     GLOBAL_TOOL_SIZES.clear()
     for op in jobs_data:
         GLOBAL_TOOL_SIZES[op['tool_set']] = op['size']
@@ -1203,13 +1101,6 @@ def load_actual_kmwe_instance(filepath):
 
 
 def resolve_kmwe_case_file(case_name):
-    """
-    Resolve a real KMWE case CSV. Synthetic fallback is deliberately disabled.
-    Accepted layouts:
-        <case_name>/<case_name>.csv
-        <case_name>/Base <case_name>.csv
-        <case_name>.csv
-    """
     possible_paths = [
         os.path.join(case_name, f"{case_name}.csv"),
         os.path.join(case_name, f"Base {case_name}.csv"),
@@ -1218,17 +1109,8 @@ def resolve_kmwe_case_file(case_name):
     for path in possible_paths:
         if os.path.exists(path):
             return path
-    raise FileNotFoundError(
-        f"Required real KMWE CSV for {case_name!r} was not found. "
-        f"Checked: {possible_paths}. Synthetic/mock data is disabled."
-    )
+    
 
-
-
-
-
-
-# ALNS-ONLY EXPERIMENT ENGINE
 
 def run_alns_only_on_file(
     case_file,
@@ -1239,10 +1121,6 @@ def run_alns_only_on_file(
     verbose=False,
     print_result=False,
 ):
-    """
-    Run ALNS-AOS+TRP only, initialized by the Practitioner Heuristic.
-    No GA/MH phase is executed.
-    """
     random.seed(seed)
     np.random.seed(seed)
 
@@ -1306,20 +1184,7 @@ def run_alns_table8_replications(
     alns_no_improvement_limit=500,
     output_excel="alns_table8_seed_results.xlsx",
 ):
-    """
-    Build a Table 8-style ALNS-only experiment on the real 6M140 KMWE case.
-
-    The 6M140 operations are sorted by release time and sliced to:
-        n = 15, 25, 30, 60, 90, 120, 140
-
-    PH   = Practitioner Heuristic initial solution
-    ALNS = ALNS-AOS+TRP initialized from PH
-
-    Synthetic/mock data is disabled.
-    """
-    print("\n" + "=" * 120)
-    print(f" REAL KMWE TABLE 8 ALNS-ONLY: 6M140 SLICES ({num_runs} SEED SAMPLES) ".center(120, "#"))
-    print("=" * 120)
+    print(f" REAL KMWE TABLE 8 ALNS-ONLY: 6M140 SLICES ({num_runs} SEED SAMPLES) ")
 
     case_file = resolve_kmwe_case_file("6M140")
     full_jobs_data, m_val, c_val = load_actual_kmwe_instance(case_file)
@@ -1341,7 +1206,6 @@ def run_alns_table8_replications(
             random.seed(seed)
             np.random.seed(seed)
 
-            # Rebuild tool size cache for this slice.
             GLOBAL_TOOL_SIZES.clear()
             for op in sliced_ops:
                 GLOBAL_TOOL_SIZES[op["tool_set"]] = op["size"]
@@ -1416,18 +1280,7 @@ def run_alns_only_replications(
     alns_no_improvement_limit=500,
     output_excel="alns_only_seed_results.xlsx",
 ):
-    """
-    Run ALNS-only experiments on real KMWE cases.
-
-    PH   = Practitioner Heuristic initial solution
-    ALNS = ALNS-AOS+TRP initialized from PH
-
-    Synthetic/mock data is disabled.
-    """
-    print("=" * 120)
-    print(f" REAL KMWE LONG-EXPLORATION ALNS-ONLY ENGINE: PH vs ALNS-AOS+TRP ({num_runs} SEED SAMPLES) ".center(120, "#"))
-    print("=" * 120)
-
+    print(f" REAL KMWE LONG-EXPLORATION ALNS-ONLY ENGINE: PH vs ALNS-AOS+TRP ({num_runs} SEED SAMPLES) ")
     rows = []
     basecase_seed_records = []
 
@@ -1518,11 +1371,4 @@ def run_table8_and_table14_replications(
         "table14_seed_results": table14_seed_results,
     }
 
-
-if __name__ == "__main__":
-    # Longer ALNS+AOS exploration defaults:
-    #   600 seconds, 2000 iterations, 500 no-improvement iterations.
-    # This gives AOS more time to adapt operator weights.
-    # One workbook is produced with Table 8 and Table 14 summaries plus
-    # all per-seed rows. tqdm progress bars show case/slice/seed progress.
-    run_table8_and_table14_replications(num_runs=10)
+run_table8_and_table14_replications(num_runs=10)
