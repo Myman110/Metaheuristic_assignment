@@ -3,15 +3,17 @@ import numpy as np
 from scipy.stats import wilcoxon
 from itertools import combinations
 
-FILES = {"Baseline": "Baseline_paper_results.xlsx", "ALNS_AOS": "ALNS_AOS_Results.xlsx", "Hybrid_GA_ALNS": "hybrid_ph_mh_alns_seed_results.xlsx", "ALNS_Q_learning": "ALNS_q_learning.xlsx"}
+FILES = {"Baseline": "Baseline_paper_results.xlsx", "ALNS_AOS": "ALNS_AOS_Results.xlsx", "Hybrid_GA_ALNS": "hybrid_ph_mh_alns_seed_results.xlsx", "ALNS_Q_learning": "ALNS_q_learn.xlsx"}
 
-outfile = "wilcoxon_case_means_runtime_ARPD_no_paper100.xlsx"
+outfile = "Final_results.xlsx"
 
 KEYS = ["table", "case", "seed"]
 
 fit_col = {"Baseline": "MH_fitness","ALNS_AOS": "ALNS_fitness","ALNS_Q_learning": "ALNS_fitness","Hybrid_GA_ALNS": "Hybrid_fitness"}
 
 time_col = {"Baseline": "MH_runtime","ALNS_AOS": "ALNS_runtime","ALNS_Q_learning": "ALNS_runtime","Hybrid_GA_ALNS": "Hybrid_ALNS_runtime"}
+
+STOP_REASONS = ["no_improvement_limit", "iteration_limit", "time_limit"]
 
 paper_df = pd.DataFrame([
     ["table8", "15", 10, 0],
@@ -28,27 +30,31 @@ paper_df = pd.DataFrame([
 ], columns=["table", "case", "N_seeds_paper", "Paper_result"])
 
 
+def get_case(df):
+    if "BaseCase" in df.columns:
+        return df["BaseCase"].astype(str)
+    if "case_file" in df.columns:
+        return df["case_file"].astype(str).str.replace("\\", "/", regex=False).str.split("/").str[0]
+    if "n" in df.columns:
+        return df["n"].astype(str)
+    raise ValueError("No case column found")
+
+
+def get_table(df, sheet_name):
+    if "table" in df.columns:
+        return df["table"].astype(str).str.lower().str.replace(" ", "", regex=False).str.replace("_", "", regex=False)
+    if "table8" in sheet_name.lower() or "n" in df.columns:
+        return "table8"
+    if "table14" in sheet_name.lower() or "basecase" in [c.lower() for c in df.columns]:
+        return "table14"
+    return "unknown"
+
+
 def clean_sheet(df, method, sheet_name, col_dict):
     df = df.copy()
     req_col = col_dict[method]
-
-    if "BaseCase" in df.columns:
-        df["case"] = df["BaseCase"].astype(str)
-    elif "case_file" in df.columns:
-        df["case"] = (df["case_file"].astype(str).str.replace("\\", "/", regex=False).str.split("/").str[0])
-    elif "n" in df.columns:
-        df["case"] = df["n"].astype(str)
-    else:
-        raise ValueError("No case column found")
-
-    if "table" in df.columns:
-        df["table"] = (df["table"].astype(str).str.lower().str.replace(" ", "", regex=False).str.replace("_", "", regex=False))
-    elif "table8" in sheet_name.lower() or "n" in df.columns:
-        df["table"] = "table8"
-    elif "table14" in sheet_name.lower() or "basecase" in [c.lower() for c in df.columns]:
-        df["table"] = "table14"
-    else:
-        df["table"] = "unknown"
+    df["case"] = get_case(df)
+    df["table"] = get_table(df, sheet_name)
 
     out = df[["table", "case", "seed", req_col]].copy()
     out = out.rename(columns={req_col: method})
@@ -113,6 +119,66 @@ def calc_means(df, suffix):
             rows.append(row)
     return sort_cases(pd.DataFrame(rows))
 
+
+def find_stop_col(df):
+    for col in df.columns:
+        if "stop" in col.lower():
+            return col
+    return None
+
+
+def read_stop_reasons(path, method):
+    xls = pd.ExcelFile(path)
+    frames = []
+    for sheet in xls.sheet_names:
+        if "seed" not in sheet.lower():
+            continue
+        df = pd.read_excel(path, sheet_name=sheet)
+        if df.empty or "seed" not in df.columns:
+            continue
+
+        stop_col = find_stop_col(df)
+        if stop_col is None:
+            if method == "Baseline":
+                df["stop_reason"] = "no_improvement_limit"
+                stop_col = "stop_reason"
+            else:
+                print(f"Skipping stop reasons for {method} / {sheet}: no stop column found")
+                continue
+
+        try:
+            df["case"] = get_case(df)
+            df["table"] = get_table(df, sheet)
+        except Exception as e:
+            print(f"Skipping stop reasons for {method} / {sheet}: {e}")
+            continue
+
+        out = df[["table", "case", "seed", stop_col]].copy()
+        out = out.rename(columns={stop_col: "stop_reason"})
+        out["seed"] = pd.to_numeric(out["seed"], errors="coerce")
+        out = out.dropna(subset=["seed", "stop_reason"])
+        out["seed"] = out["seed"].astype(int)
+        out["method"] = method
+        out["stop_reason"] = out["stop_reason"].astype(str)
+        frames.append(out)
+
+    if not frames:
+        return pd.DataFrame(columns=["table", "case", "seed", "stop_reason", "method"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def build_stop_counts():
+    raw = pd.concat([read_stop_reasons(fp, m)for m, fp in FILES.items()], ignore_index=True)
+    counts = raw.groupby(["table", "case", "method", "stop_reason"]).size().reset_index(name="count")
+    wide = counts.pivot_table(index=["table", "case", "method"], columns="stop_reason", values="count", fill_value=0).reset_index()
+    for reason in STOP_REASONS:
+        if reason not in wide.columns:
+            wide[reason] = 0
+    wide["total_runs"] = wide[STOP_REASONS].sum(axis=1)
+    wide = wide[["table", "case", "method"] + STOP_REASONS + ["total_runs"]]
+    return sort_cases(wide)
+
+
 fit_wide = build_wide(fit_col)
 results = []
 
@@ -161,6 +227,7 @@ wilcox_df = pd.DataFrame(results)
 fit_df = calc_means(fit_wide, "mean_fitness")
 time_wide = build_wide(time_col)
 time_df = calc_means(time_wide, "mean_time")
+stop_df = build_stop_counts()
 
 summary = fit_df.merge(time_df,on=["table", "case", "N_seeds"],how="outer")
 
@@ -183,5 +250,7 @@ with pd.ExcelWriter(outfile, engine="openpyxl") as writer:
     paper_df.to_excel(writer, sheet_name="paper_results",index=False)
 
     fit_wide.to_excel(writer, sheet_name="paired_seed_data", index=False)
+
+    stop_df.to_excel(writer, sheet_name="stop_reason_counts", index=False)
 
 print(f"Saved: {outfile}")
