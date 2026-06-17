@@ -15,7 +15,7 @@ files = {
     "ALNS_Q_learning": "ALNS_q_learn.xlsx",
 }
 
-output_file = "ALL_results.xlsx"
+output_file = "All_results.xlsx"
 
 # =========================
 # COLUMN RULES
@@ -315,14 +315,7 @@ summary_df = summary_df.merge(
     how="left"
 )
 
-methods_for_arpd = [
-    "Baseline",
-    "ALNS_AOS",
-    "Hybrid_GA_ALNS",
-    "ALNS_Q_learning",
-]
-
-for method in methods_for_arpd:
+for method in files.keys():
     method_col = f"{method}_mean_fitness"
 
     summary_df[f"{method}_ARPD_vs_Paper_%"] = np.where(
@@ -332,6 +325,122 @@ for method in methods_for_arpd:
     )
 
 summary_df = sort_cases(summary_df)
+
+# =========================
+# STOP REASON COUNTS PER CASE AND METHOD
+# =========================
+
+stop_reasons_to_count = [
+    "no_improvement_limit",
+    "iteration_limit",
+    "time_limit"
+]
+
+
+def find_stop_column(df):
+    for col in df.columns:
+        if "stop" in col.lower():
+            return col
+    return None
+
+
+def read_stop_reasons(file_path, method):
+    xls = pd.ExcelFile(file_path)
+    frames = []
+
+    for sheet in xls.sheet_names:
+        if "seed" not in sheet.lower():
+            continue
+
+        df = pd.read_excel(file_path, sheet_name=sheet)
+
+        if df.empty or "seed" not in df.columns:
+            continue
+
+        stop_col = find_stop_column(df)
+
+        # Baseline has no stop column, so assign no_improvement_limit
+        if stop_col is None:
+            if method == "Baseline":
+                df["stop_reason"] = "no_improvement_limit"
+                stop_col = "stop_reason"
+            else:
+                print(f"Skipping stop reasons for {method} / {sheet}: no stop column found")
+                continue
+
+        if "BaseCase" in df.columns:
+            df["case"] = df["BaseCase"].astype(str)
+        elif "case_file" in df.columns:
+            df["case"] = normalize_instance_name(df["case_file"])
+        elif "n" in df.columns:
+            df["case"] = df["n"].astype(str)
+        else:
+            continue
+
+        if "table" in df.columns:
+            df["table"] = normalize_table_name(df["table"])
+        elif "table8" in sheet.lower() or "n" in df.columns:
+            df["table"] = "table8"
+        elif "table14" in sheet.lower() or "basecase" in [c.lower() for c in df.columns]:
+            df["table"] = "table14"
+        else:
+            df["table"] = "unknown"
+
+        out = df[["table", "case", "seed", stop_col]].copy()
+        out = out.rename(columns={stop_col: "stop_reason"})
+
+        out["seed"] = pd.to_numeric(out["seed"], errors="coerce")
+        out = out.dropna(subset=["seed", "stop_reason"])
+        out["seed"] = out["seed"].astype(int)
+        out["method"] = method
+        out["stop_reason"] = out["stop_reason"].astype(str)
+
+        frames.append(out)
+
+    if not frames:
+        return pd.DataFrame(columns=["table", "case", "seed", "stop_reason", "method"])
+
+    return pd.concat(frames, ignore_index=True)
+
+
+stop_reason_raw = []
+
+for method, file_path in files.items():
+    stop_reason_raw.append(read_stop_reasons(file_path, method))
+
+stop_reason_raw_df = pd.concat(stop_reason_raw, ignore_index=True)
+
+stop_reason_counts_df = (
+    stop_reason_raw_df
+    .groupby(["table", "case", "method", "stop_reason"])
+    .size()
+    .reset_index(name="count")
+)
+
+stop_reason_counts_wide = (
+    stop_reason_counts_df
+    .pivot_table(
+        index=["table", "case", "method"],
+        columns="stop_reason",
+        values="count",
+        fill_value=0
+    )
+    .reset_index()
+)
+
+for reason in stop_reasons_to_count:
+    if reason not in stop_reason_counts_wide.columns:
+        stop_reason_counts_wide[reason] = 0
+
+stop_reason_counts_wide["total_runs"] = (
+    stop_reason_counts_wide[stop_reasons_to_count].sum(axis=1)
+)
+
+stop_reason_counts_wide = stop_reason_counts_wide[
+    ["table", "case", "method"] + stop_reasons_to_count + ["total_runs"]
+]
+
+stop_reason_counts_wide = sort_cases(stop_reason_counts_wide)
 
 # =========================
 # SAVE OUTPUT
@@ -344,5 +453,7 @@ with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
     runtime_averages_df.to_excel(writer, sheet_name="mean_runtime", index=False)
     paper_results.to_excel(writer, sheet_name="paper_results", index=False)
     fitness_wide.to_excel(writer, sheet_name="paired_seed_data", index=False)
+    stop_reason_counts_wide.to_excel(writer, sheet_name="stop_reason_counts", index=False)
+    stop_reason_raw_df.to_excel(writer, sheet_name="stop_reason_raw", index=False)
 
 print(f"Saved: {output_file}")
