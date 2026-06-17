@@ -3,12 +3,7 @@ import random
 import time
 import numpy as np
 import pandas as pd
-
-try:
-    from tqdm.auto import tqdm
-except ImportError:  # Fallback so the script still runs if tqdm is not installed.
-    def tqdm(iterable=None, *args, **kwargs):
-        return iterable
+from tqdm import tqdm
 
 # Global cache for tool sizes to optimize search speed in the knapsack solver
 GLOBAL_TOOL_SIZES = {}
@@ -20,24 +15,34 @@ GLOBAL_TOOL_SIZES = {}
 def _safe_sheet_name(name):
     return str(name)[:31].replace("/", "_").replace("\\", "_").replace("?", "_").replace("*", "_").replace("[", "(").replace("]", ")").replace(":", "-")
 
+
 def export_seed_results_to_excel(output_path, **sheets):
-    """Write summary and per-seed result DataFrames to one Excel workbook."""
+    """Write only per-seed result DataFrames to one Excel workbook."""
     if not output_path:
         return None
+
     output_path = str(output_path)
     if not output_path.lower().endswith(".xlsx"):
         output_path += ".xlsx"
+
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         for sheet_name, data in sheets.items():
             if data is None:
                 continue
+
             df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
-            df.to_excel(writer, sheet_name=_safe_sheet_name(sheet_name), index=False)
-            ws = writer.sheets[_safe_sheet_name(sheet_name)]
+            safe_name = _safe_sheet_name(sheet_name)
+            df.to_excel(writer, sheet_name=safe_name, index=False)
+
+            ws = writer.sheets[safe_name]
             for col_cells in ws.columns:
-                max_len = max(len(str(cell.value)) if cell.value is not None else 0 for cell in col_cells)
+                max_len = max(
+                    len(str(cell.value)) if cell.value is not None else 0
+                    for cell in col_cells
+                )
                 ws.column_dimensions[col_cells[0].column_letter].width = min(max(max_len + 2, 10), 38)
-    print(f"\n[EXCEL EXPORT] Seed-level results written to: {output_path}")
+
+    print(f"\n[EXCEL EXPORT] Per-seed Table 8 and Table 14 results written to: {output_path}")
     return output_path
 
 # =====================================================================
@@ -1068,9 +1073,14 @@ def run_alns_only_on_file(
         "Improvement_vs_PH_%": ((alns_solution.fitness - ph_solution.fitness) / max(1.0, ph_solution.fitness)) * 100.0,
     }
 
-    print(pd.DataFrame([result]).to_string(index=False))
-    return alns_solution, result
+    # Keep direct output clean. Per-seed results are written to Excel only.
+    if verbose:
+        tqdm.write(
+            f"{case_file} | seed={seed} | "
+            f"PH={ph_solution.fitness:.2f} | ALNS={alns_solution.fitness:.2f}"
+        )
 
+    return alns_solution, result
 
 
 def run_alns_table8_replications(
@@ -1078,7 +1088,6 @@ def run_alns_table8_replications(
     alns_time_seconds=600.0,
     alns_iterations=2000,
     alns_no_improvement_limit=500,
-    output_excel="alns_table8_seed_results.xlsx",
 ):
     """
     Build a Table 8-style ALNS-only experiment on the real 6M140 KMWE case.
@@ -1090,24 +1099,21 @@ def run_alns_table8_replications(
     ALNS = ALNS-AOS+TRP initialized from PH
 
     Synthetic/mock data is disabled.
-    """
-    print("\n" + "=" * 120)
-    print(f" REAL KMWE TABLE 8 ALNS-ONLY: 6M140 SLICES ({num_runs} SEED SAMPLES) ".center(120, "#"))
-    print("=" * 120)
 
+    Returns only seed-level rows. No summary table is printed.
+    """
     case_file = resolve_kmwe_case_file("6M140")
     full_jobs_data, m_val, c_val = load_actual_kmwe_instance(case_file)
     df_base = pd.DataFrame(full_jobs_data)
     df_sorted = df_base.sort_values(by="r").copy()
 
-    rows = []
     table8_seed_records = []
+    n_slices = [15, 25, 30, 60, 90, 120, 140]
 
-    for n_slice in tqdm([15, 25, 30, 60, 90, 120, 140], desc="Table 8 Instances"):
+    for n_slice in tqdm(n_slices, desc="Table 8 slices", position=0):
         sliced_ops = df_sorted.head(n_slice).to_dict(orient="records")
-        records = []
 
-        for seed in tqdm(range(num_runs), desc=f"n={n_slice}", leave=False):
+        for seed in tqdm(range(num_runs), desc=f"Table 8 n={n_slice}", leave=False, position=1):
             random.seed(seed)
             np.random.seed(seed)
 
@@ -1142,41 +1148,25 @@ def run_alns_table8_replications(
             )
             decoder.evaluate(alns_solution)
 
-            records.append({
+            table8_seed_records.append({
                 "n": n_slice,
                 "seed": seed,
                 "PH_fitness": ph_solution.fitness,
+                "PH_tardiness": ph_solution.tardiness,
+                "PH_setups": ph_solution.setups,
                 "PH_runtime": ph_runtime,
                 "ALNS_fitness": alns_solution.fitness,
+                "ALNS_tardiness": alns_solution.tardiness,
+                "ALNS_setups": alns_solution.setups,
                 "ALNS_runtime": alns_solution.alns_runtime,
                 "ALNS_iterations": alns_solution.alns_iterations,
                 "ALNS_stop": alns_solution.alns_stop_reason,
+                "ALNS_cache_hits": getattr(alns_solution, "alns_eval_cache_hits", None),
+                "ALNS_cache_misses": getattr(alns_solution, "alns_eval_cache_misses", None),
+                "Improvement_vs_PH_%": ((alns_solution.fitness - ph_solution.fitness) / max(1.0, ph_solution.fitness)) * 100.0,
             })
 
-        table8_seed_records.extend(records)
-
-
-        ph = np.array([r["PH_fitness"] for r in records], dtype=float)
-        alns = np.array([r["ALNS_fitness"] for r in records], dtype=float)
-
-        rows.append({
-            "n": n_slice,
-            "PH_μ": round(float(np.mean(ph)), 2),
-            "PH_σ": round(float(np.std(ph)), 2),
-            "PH_C.T.(s)": round(float(np.mean([r["PH_runtime"] for r in records])), 3),
-            "ALNS_μ": round(float(np.mean(alns)), 2),
-            "ALNS_σ": round(float(np.std(alns)), 2),
-            "ALNS_C.T.(s)": round(float(np.mean([r["ALNS_runtime"] for r in records])), 3),
-            "ALNS_it_μ": round(float(np.mean([r["ALNS_iterations"] for r in records])), 1),
-            "Gap_ALNS_vs_PH (%)": f"{((np.mean(alns) - np.mean(ph)) / max(1.0, np.mean(ph))) * 100.0:.2f}%",
-            "ALNS_StopReasons": ",".join(sorted(set(r["ALNS_stop"] for r in records))),
-        })
-
-    summary = pd.DataFrame(rows)
-    print("\n[ALNS-ONLY TABLE 8 SUMMARY: REAL 6M140 SLICES]")
-    print(summary.to_string(index=False))
-    export_seed_results_to_excel(output_excel, table8_summary=summary, table8_seed_results=pd.DataFrame(table8_seed_records))
-    return summary, pd.DataFrame(table8_seed_records)
+    return pd.DataFrame(table8_seed_records)
 
 
 def run_alns_only_replications(
@@ -1184,28 +1174,27 @@ def run_alns_only_replications(
     alns_time_seconds=600.0,
     alns_iterations=2000,
     alns_no_improvement_limit=500,
-    output_excel="alns_only_seed_results.xlsx",
 ):
     """
-    Run ALNS-only experiments on real KMWE cases.
+    Run ALNS-only experiments on real KMWE base cases.
+
+    This corresponds to the Table 14-style base-case seed results:
+        2M38, 2M46, 6M140, 6M163
 
     PH   = Practitioner Heuristic initial solution
     ALNS = ALNS-AOS+TRP initialized from PH
 
     Synthetic/mock data is disabled.
+
+    Returns only seed-level rows. No summary table is printed.
     """
-    print("=" * 120)
-    print(f" REAL KMWE LONG-EXPLORATION ALNS-ONLY ENGINE: PH vs ALNS-AOS+TRP ({num_runs} SEED SAMPLES) ".center(120, "#"))
-    print("=" * 120)
+    table14_seed_records = []
+    case_names = ["2M38", "2M46", "6M140", "6M163"]
 
-    rows = []
-    basecase_seed_records = []
-
-    for case_name in tqdm(["2M38", "2M46", "6M140", "6M163"], desc="Base Cases"):
+    for case_name in tqdm(case_names, desc="Table 14 base cases", position=0):
         case_file = resolve_kmwe_case_file(case_name)
-        records = []
 
-        for seed in tqdm(range(num_runs), desc=f"{case_name}", leave=False):
+        for seed in tqdm(range(num_runs), desc=f"Table 14 {case_name}", leave=False, position=1):
             _, result = run_alns_only_on_file(
                 case_file,
                 seed=seed,
@@ -1216,34 +1205,50 @@ def run_alns_only_replications(
             )
             result["BaseCase"] = case_name
             result["seed"] = seed
-            records.append(result)
+            table14_seed_records.append(result)
 
-        ph = np.array([r["PH_fitness"] for r in records], dtype=float)
-        alns = np.array([r["ALNS_fitness"] for r in records], dtype=float)
+    return pd.DataFrame(table14_seed_records)
 
-        rows.append({
-            "BaseCase": case_name,
-            "PH_μ": round(float(np.mean(ph)), 2),
-            "PH_σ": round(float(np.std(ph)), 2),
-            "PH_C.T.(s)": round(float(np.mean([r["PH_runtime"] for r in records])), 3),
-            "ALNS_μ": round(float(np.mean(alns)), 2),
-            "ALNS_σ": round(float(np.std(alns)), 2),
-            "ALNS_C.T.(s)": round(float(np.mean([r["ALNS_runtime"] for r in records])), 3),
-            "ALNS_it_μ": round(float(np.mean([r["ALNS_iterations"] for r in records])), 1),
-            "Gap_ALNS_vs_PH (%)": f"{((np.mean(alns) - np.mean(ph)) / max(1.0, np.mean(ph))) * 100.0:.2f}%",
-            "ALNS_StopReasons": ",".join(sorted(set(r["ALNS_stop"] for r in records))),
-        })
 
-    summary = pd.DataFrame(rows)
-    print("\n[ALNS-ONLY SUMMARY: REAL KMWE BASE CASES]")
-    print(summary.to_string(index=False))
-    export_seed_results_to_excel(output_excel, basecase_summary=summary, basecase_seed_results=pd.DataFrame(basecase_seed_records))
-    return summary, pd.DataFrame(basecase_seed_records)
+def run_all_seed_experiments_to_excel(
+    num_runs=10,
+    alns_time_seconds=600.0,
+    alns_iterations=2000,
+    alns_no_improvement_limit=500,
+    output_excel="alns_aos_table8_table14_seed_results.xlsx",
+):
+    """
+    Run Table 8 and Table 14 experiments and write only per-seed results to Excel.
+
+    Excel sheets produced:
+        - table8_seed_results
+        - table14_seed_results
+    """
+    table8_seed_results = run_alns_table8_replications(
+        num_runs=num_runs,
+        alns_time_seconds=alns_time_seconds,
+        alns_iterations=alns_iterations,
+        alns_no_improvement_limit=alns_no_improvement_limit,
+    )
+
+    table14_seed_results = run_alns_only_replications(
+        num_runs=num_runs,
+        alns_time_seconds=alns_time_seconds,
+        alns_iterations=alns_iterations,
+        alns_no_improvement_limit=alns_no_improvement_limit,
+    )
+
+    export_seed_results_to_excel(
+        output_excel,
+        table8_seed_results=table8_seed_results,
+        table14_seed_results=table14_seed_results,
+    )
+
+    return table8_seed_results, table14_seed_results
 
 
 if __name__ == "__main__":
     # Longer ALNS+AOS exploration defaults:
     #   300 seconds, 1000 iterations, 200 no-improvement iterations.
     # This gives AOS more time to adapt operator weights.
-    run_alns_table8_replications(num_runs=10)
-    run_alns_only_replications(num_runs=10)
+    run_all_seed_experiments_to_excel(num_runs=10)
