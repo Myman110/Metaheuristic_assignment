@@ -1519,10 +1519,4 @@ def run_table8_and_table14_replications(
     }
 
 
-if __name__ == "__main__":
-    # Longer ALNS+AOS exploration defaults:
-    #   600 seconds, 2000 iterations, 500 no-improvement iterations.
-    # This gives AOS more time to adapt operator weights.
-    # One workbook is produced with Table 8 and Table 14 summaries plus
-    # all per-seed rows. tqdm progress bars show case/slice/seed progress.
-    run_table8_and_table14_replications(num_runs=10)
+run_table8_and_table14_replications(num_runs=10)
