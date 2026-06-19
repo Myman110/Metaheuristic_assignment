@@ -3,50 +3,36 @@ import random
 import time
 import numpy as np
 import pandas as pd
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
-TL_SIZES = {}
+TL_SZ = {}
 
-def _safe_sh(name):
-    return str(name)[:31].replace("/", "_").replace("\\", "_").replace("?", "_").replace("*", "_").replace("[", "(").replace("]", ")").replace(":", "-")
+def _safe_sh(n):
+    return str(n)[:31].replace("/", "_").replace("\\", "_").replace("?", "_").replace("*", "_").replace("[", "(").replace("]", ")").replace(":", "-")
 
-def export_seed_results_to_excel(path, **sheets):
-    if not path:
+def export_xls(p, **shs):
+    if not p:
         return None
-    path = str(path)
-    if not path.lower().endswith(".xlsx"):
-        path += ".xlsx"
-    with pd.ExcelWriter(path, engine="openpyxl") as wr:
-        for s_name, data in sheets.items():
+    p = str(p) if str(p).lower().endswith(".xlsx") else str(p) + ".xlsx"
+    with pd.ExcelWriter(p, engine="openpyxl") as wr:
+        for s_n, data in shs.items():
             if data is None:
                 continue
             df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
-            df.to_excel(wr, sheet_name=_safe_sh(s_name), index=False)
-            ws = wr.sheets[_safe_sh(s_name)]
+            sf_n = _safe_sh(s_n)
+            df.to_excel(wr, sheet_name=sf_n, index=False)
+            ws = wr.sheets[sf_n]
             for col in ws.columns:
                 mx = max(len(str(c.value)) if c.value is not None else 0 for c in col)
                 ws.column_dimensions[col[0].column_letter].width = min(max(mx + 2, 10), 38)
-    print(f"\n[Export] Results written to: {path}")
-    return path
-
-B = 1
-POP_SIZE = 100
-ELITISM_RATE = 0.10
-UNIFORM_MUTATION_PROB = 0.01
-SWAP_MUTATION_PROB = 0.01
-TOURNAMENT_RATE = 0.20
-NO_IMPROVEMENT_LIMIT = 20
-MAX_TIME_SECONDS = 3600.0
-SETUP_TIME = 1.0
-THETA_M = 72.0
+    return p
 
 def trm_solve(mag, sizes, scores, req):
     if req <= 0:
         return []
     tls = sorted(list(mag))
     n = len(tls)
-    best_k = None
-    best_sub = []
+    best_k, best_sub = None, []
     for mask in range(1, 1 << n):
         sub = [tls[i] for i in range(n) if mask & (1 << i)]
         freed = sum(sizes[t] for t in sub)
@@ -55,8 +41,7 @@ def trm_solve(mag, sizes, scores, req):
         obj = sum(scores.get(t, 0) for t in sub)
         k = (obj, freed, len(sub), tuple(sub))
         if best_k is None or k < best_k:
-            best_k = k
-            best_sub = sub
+            best_k, best_sub = k, sub
     return best_sub
 
 class Ind:
@@ -94,7 +79,7 @@ class Dec:
         for mid in range(1, self.num_m + 1):
             curr = 0
             for t in m_seq[mid]:
-                sz = TL_SIZES[t]
+                sz = TL_SZ[t]
                 if curr + sz <= self.C:
                     Tm[mid].add(t)
                     curr += sz
@@ -129,7 +114,7 @@ class Dec:
             if t not in Tm[mid]:
                 z = 1
                 su_pos.append(g)
-                curr_sz = sum(TL_SIZES[x] for x in Tm[mid])
+                curr_sz = sum(TL_SZ[x] for x in Tm[mid])
                 free = self.C - curr_sz
                 if free < sz:
                     need = sz - free
@@ -145,14 +130,14 @@ class Dec:
                         else:
                             scores[ft] = 0
                     z_sc = [x for x in Tm[mid] if scores[x] == 0]
-                    z_wt = sum(TL_SIZES[x] for x in z_sc)
+                    z_wt = sum(TL_SZ[x] for x in z_sc)
                     if z_wt >= need:
                         for x in z_sc:
                             Tm[mid].remove(x)
                     else:
                         for x in z_sc:
                             Tm[mid].remove(x)
-                        evict = trm_solve(list(Tm[mid]), TL_SIZES, scores, need - z_wt)
+                        evict = trm_solve(list(Tm[mid]), TL_SZ, scores, need - z_wt)
                         for x in evict:
                             Tm[mid].remove(x)
                     Tm[mid].add(t)
@@ -172,7 +157,7 @@ class Dec:
         ind.su_pos = su_pos
 
 class PracHeur:
-    def __init__(self, ops, num_m, cap, tau=SETUP_TIME, theta=THETA_M):
+    def __init__(self, ops, num_m, cap, tau=1.0, theta=72.0):
         self.O = ops
         self.M = list(range(1, num_m + 1))
         self.C = cap
@@ -237,17 +222,12 @@ class PracHeur:
         return ind
 
 class Alns:
-    def __init__(self, ops, num_m, cap, tau=1.0, alpha=0.20, gamma=0.80, eps=0.30, eps_min=0.05, eps_dec=0.995, r_scale=0.05, dst_f=(0.03, 0.08), temp=None, cool=0.995, min_t=1e-6, max_ins=12, max_mc=3, max_rem=8):
+    def __init__(self, ops, num_m, cap, tau=1.0, rx=0.20, dst_f=(0.03, 0.08), temp=None, cool=0.995, min_t=1e-6, max_ins=12, max_mc=3, max_rem=8, dp_p=25, dp_ins=30, rwd_sc=0.05):
         self.ops = ops
         self.num_m = num_m
         self.C = cap
         self.tau = tau
-        self.alpha = alpha
-        self.gamma = gamma
-        self.eps = eps
-        self.eps_min = eps_min
-        self.eps_dec = eps_dec
-        self.r_scale = r_scale
+        self.rx = rx
         self.dst_f = dst_f
         self.temp = temp
         self.cool = cool
@@ -255,6 +235,9 @@ class Alns:
         self.max_ins = max_ins
         self.max_mc = max_mc
         self.max_rem = max_rem
+        self.dp_p = dp_p
+        self.dp_ins = dp_ins
+        self.rwd_sc = rwd_sc
         self.cache = {}
         self.hits, self.miss, self.cur_it = 0, 0, 0
         self.ops_by_j = {}
@@ -267,8 +250,6 @@ class Alns:
         self.dec = Dec(self.ops_by_j, self.num_m, self.C, self.tau)
         self.dst_ops = {"rand": self.dst_rand, "edd": self.dst_edd, "load": self.dst_load, "su": self.dst_su}
         self.rep_ops = {"greedy": self.rep_greedy, "regret": self.rep_regret, "edd": self.rep_edd, "load": self.rep_load}
-        self.actions = [(d, r) for d in self.dst_ops for r in self.rep_ops]
-        self.q_table = {}
         self.dst_w = {n: 1.0 for n in self.dst_ops}
         self.rep_w = {n: 1.0 for n in self.rep_ops}
 
@@ -293,51 +274,16 @@ class Alns:
         self.cache[k] = self.clone(ind)
         return ind
 
-    def _get_state(self, cur, best, no_imp):
-        ref = max(1.0, abs(best.fit))
-        gap = max(0.0, (cur.fit - best.fit) / ref)
-        g_bucket = "near_best" if gap <= 0.01 else "large_gap"
-        t_ref = max(self.min_t, self.init_temp or max(1.0, abs(cur.fit)))
-        t_ratio = max(0.0, self.temp / t_ref)
-        t_bucket = "hot" if t_ratio >= 0.15 else "cold"
-        s_bucket = "fresh" if no_imp < 15 else ("mild" if no_imp < 50 else "stagnated")
-        return (g_bucket, t_bucket, s_bucket)
+    def _sample(self, w):
+        nms = list(w.keys())
+        v = np.array([max(1e-12, w[n]) for n in nms], dtype=float)
+        p = v / v.sum()
+        return str(np.random.choice(nms, p=p))
 
-    def _ensure_state(self, s):
-        if s not in self.q_table:
-            self.q_table[s] = {a: 0.0 for a in self.actions}
-
-    def _sample(self, s):
-        self._ensure_state(s)
-        if random.random() < self.eps:
-            return random.choice(self.actions)
-        q_vals = self.q_table[s]
-        max_q = max(q_vals.values())
-        best_a = [a for a, q in q_vals.items() if q == max_q]
-        return random.choice(best_a)
-
-    def _up_q(self, s, a, rwd, s_nxt):
-        self._ensure_state(s)
-        self._ensure_state(s_nxt)
-        old_q = self.q_table[s][a]
-        max_nxt = max(self.q_table[s_nxt].values())
-        target = rwd + self.gamma * max_nxt
-        self.q_table[s][a] = old_q + self.alpha * (target - old_q)
-
-    def _decay_eps(self):
-        self.eps = max(self.eps_min, self.eps * self.eps_dec)
-
-    def _refresh_w(self):
-        d_sc = {n: [] for n in self.dst_ops}
-        r_sc = {n: [] for n in self.rep_ops}
-        for vals in self.q_table.values():
-            for (d, r), q in vals.items():
-                d_sc[d].append(q)
-                r_sc[r].append(q)
-        for d in self.dst_ops:
-            self.dst_w[d] = max(0.05, 1.0 + (float(np.mean(d_sc[d])) if d_sc[d] else 0.0))
-        for r in self.rep_ops:
-            self.rep_w[r] = max(0.05, 1.0 + (float(np.mean(r_sc[r])) if r_sc[r] else 0.0))
+    def _up_w(self, w, name, rwd):
+        rho = self.rx
+        w[name] = (1.0 - rho) * w[name] + rho * rwd
+        w[name] = max(0.05, w[name])
 
     def _accept(self, cand, cur):
         if cand.fit <= cur.fit:
@@ -367,7 +313,7 @@ class Alns:
 
     def _pos_cand(self, p_j, jid, deep=False):
         safe = self._safe_pos(p_j, jid)
-        lim = 30 if deep else self.max_ins
+        lim = self.dp_ins if deep else self.max_ins
         if len(safe) <= lim:
             return safe
         occ = p_j.count(jid)
@@ -483,7 +429,7 @@ class Alns:
         jobs = list(rem_j)
         random.shuffle(jobs)
         cj, cm = list(p_j), list(p_m)
-        deep = (self.cur_it % 25 == 0) if self.cur_it > 0 else False
+        deep = (self.cur_it % self.dp_p == 0) if self.cur_it > 0 else False
         for jid in jobs:
             best = self._best_ins(cj, cm, jid, deep=deep)
             cj, cm = best.jv, best.mv
@@ -492,7 +438,7 @@ class Alns:
     def rep_regret(self, p_j, p_m, rem_j):
         rem = list(rem_j)
         cj, cm = list(p_j), list(p_m)
-        deep = (self.cur_it % 25 == 0) if self.cur_it > 0 else False
+        deep = (self.cur_it % self.dp_p == 0) if self.cur_it > 0 else False
         while rem:
             best_ch = None
             for jid in rem:
@@ -518,7 +464,7 @@ class Alns:
     def rep_edd(self, p_j, p_m, rem_j):
         cj, cm = list(p_j), list(p_m)
         jobs = list(rem_j)
-        deep = (self.cur_it % 25 == 0) if self.cur_it > 0 else False
+        deep = (self.cur_it % self.dp_p == 0) if self.cur_it > 0 else False
         jobs.sort(key=lambda j: self.ops_by_j[j][cj.count(j)]["d"])
         for jid in jobs:
             occ = cj.count(jid)
@@ -574,17 +520,16 @@ class Alns:
             ref = 1.0
         else:
             return 0.1
-        bonus = self.r_scale * 100.0 * max(0.0, imp / ref)
+        bonus = self.rwd_sc * 100.0 * max(0.0, imp / ref)
         return base + bonus
 
-    def run(self, init_sol, max_it=250, max_t=60.0, stagn=50, record_h=True, show_pr=True, pr_desc="ALNS", verbose=False):
+    def run(self, init_sol, max_it=250, max_t=60.0, stagn=50, record_h=True, show_pr=False, pr_desc="ALNS", verbose=False):
         t0 = time.time()
         cur = self.clone(init_sol)
         self.dec.eval_ind(cur)
         best = self.clone(cur)
         if self.temp is None:
             self.temp = max(1.0, 0.05 * abs(cur.fit))
-        self.init_temp = self.temp
         hist = []
         no_imp = 0
         stop = "it_lim"
@@ -598,9 +543,8 @@ class Alns:
             if no_imp >= stagn:
                 stop = "no_imp_lim"
                 break
-            s = self._get_state(cur, best, no_imp)
-            a = self._sample(s)
-            dst_name, rep_name = a
+            dst_name = self._sample(self.dst_w)
+            rep_name = self._sample(self.rep_w)
             q = self._get_q(len(cur.jv))
             p_j, p_m, rem_j = self.dst_ops[dst_name](cur, q)
             cand = self.rep_ops[rep_name](p_j, p_m, rem_j)
@@ -613,31 +557,18 @@ class Alns:
                 no_imp = 0
             else:
                 no_imp += 1
-            s_next = self._get_state(cur, best, no_imp)
-            self._up_q(s, a, rwd, s_next)
-            self._decay_eps()
-            self._refresh_w()
+            self._up_w(self.dst_w, dst_name, rwd)
+            self._up_w(self.rep_w, rep_name, rwd)
             self.temp = max(self.min_t, self.temp * self.cool)
             if show_pr and (it == 1 or it % 10 == 0 or cand.fit < best.fit):
-                iterator.set_postfix(best=round(float(best.fit), 2), curr=round(float(cur.fit), 2), no_imp=int(no_imp), temp=round(float(self.temp), 3), eps=round(self.eps, 3))
+                iterator.set_postfix(best=round(float(best.fit), 2), curr=round(float(cur.fit), 2), no_imp=int(no_imp), temp=round(float(self.temp), 3))
             if verbose and (it == 1 or it % 25 == 0 or cand.fit < best.fit):
-                print(f"alns_it={it:5d} best={best.fit:.4f} cur={cur.fit:.4f} cand={cand.fit:.4f} acc={acc} d={dst_name} r={rep_name} rwd={rwd:.3f} temp={self.temp:.4f} eps={self.eps:.3f}")
+                print(f"alns_it={it:5d} best={best.fit:.4f} cur={cur.fit:.4f} cand={cand.fit:.4f} acc={acc} d={dst_name} r={rep_name} rwd={rwd:.3f} temp={self.temp:.4f}")
             if record_h:
                 hist.append({
-                    "it": it,
-                    "rt": time.time() - t0,
-                    "best": best.fit,
-                    "cur": cur.fit,
-                    "cand": cand.fit,
-                    "dst": dst_name,
-                    "rep": rep_name,
-                    "q": q,
-                    "temp": self.temp,
-                    "no_imp": no_imp,
-                    "hits": self.hits,
-                    "miss": self.miss,
-                    "dst_w": dict(self.dst_w),
-                    "rep_w": dict(self.rep_w),
+                    "it": it, "rt": time.time() - t0, "best": best.fit, "cur": cur.fit, "cand": cand.fit,
+                    "dst": dst_name, "rep": rep_name, "q": q, "temp": self.temp, "no_imp": no_imp,
+                    "hits": self.hits, "miss": self.miss, "dst_w": dict(self.dst_w), "rep_w": dict(self.rep_w)
                 })
         best.alns_it = len(hist) if record_h else it
         best.alns_rt = time.time() - t0
@@ -647,15 +578,13 @@ class Alns:
         best.rep_w = dict(self.rep_w)
         best.hits = self.hits
         best.miss = self.miss
-        best.q_table = {str(k): {f"{act[0]}+{act[1]}": float(v) for act, v in vals.items()} for k, vals in self.q_table.items()}
         return best
 
-def load_actual_kmwe_instance(path):
-    num_m = 2
-    cap = 80
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Missing file: {path}")
-    with open(path, "r") as f:
+def load_actual_kmwe_instance(p):
+    num_m, cap = 2, 80
+    if not os.path.exists(p):
+        raise FileNotFoundError(f"Missing file: {p}")
+    with open(p, "r") as f:
         for _ in range(5):
             ln = f.readline().strip()
             if not ln:
@@ -667,176 +596,126 @@ def load_actual_kmwe_instance(path):
                     num_m = int(v)
                 elif k == "C":
                     cap = int(v)
-    df = pd.read_csv(path, skiprows=5)
+    df = pd.read_csv(p, skiprows=5)
     cols = ["job_id", "op_id", "r", "p", "d", "tool_set", "size"]
     df.columns = cols
     for col in cols:
         df[col] = pd.to_numeric(df[col])
     ops = df.to_dict(orient="records")
-    TL_SIZES.clear()
+    TL_SZ.clear()
     for op in ops:
-        TL_SIZES[op["tool_set"]] = op["size"]
+        TL_SZ[op["tool_set"]] = op["size"]
     return ops, num_m, cap
 
 def resolve_kmwe_case_file(case_name):
     possible = [os.path.join(case_name, f"{case_name}.csv"), os.path.join(case_name, f"Base {case_name}.csv"), f"{case_name}.csv"]
-    for path in possible:
-        if os.path.exists(path):
-            return path
+    for p in possible:
+        if os.path.exists(p):
+            return p
     raise FileNotFoundError(f"Missing baseline file for: {case_name}")
 
-def run_alns_only_on_file(case_file, seed=0, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, verbose=False, show_progress=True):
+def run_alns_only_on_file(case_file, seed=0, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, verbose=False, show_progress=False):
     random.seed(seed)
     np.random.seed(seed)
-    jobs_data, m_case, c_case = load_actual_kmwe_instance(case_file)
+    ops, m_case, c_case = load_actual_kmwe_instance(case_file)
     t0 = time.time()
-    ph_engine = PracHeur(jobs_data, m_case, c_case)
-    ph_solution = ph_engine.run()
-    ph_runtime = time.time() - t0
-    ops_by_job = {}
-    for op in jobs_data:
+    ph_engine = PracHeur(ops, m_case, c_case)
+    ph_sol = ph_engine.run()
+    ph_rt = time.time() - t0
+    ops_by_j = {}
+    for op in ops:
         jid = int(op["job_id"])
-        ops_by_job.setdefault(jid, []).append(op)
-    for jid in ops_by_job:
-        ops_by_job[jid].sort(key=lambda x: x["op_id"])
-    decoder = Dec(ops_by_job, m_case, c_case, SETUP_TIME)
-    decoder.eval_ind(ph_solution)
-    alns_engine = Alns(jobs_data, m_case, c_case, SETUP_TIME)
-    alns_solution = alns_engine.run(ph_solution, max_t=alns_time_seconds, max_it=alns_iterations, stagn=alns_no_improvement_limit, record_h=True, verbose=verbose, show_pr=show_progress, pr_desc=f"ALNS {os.path.basename(case_file).split('.')[0]} Seed={seed}")
-    decoder.eval_ind(alns_solution)
-    result = {
+        ops_by_j.setdefault(jid, []).append(op)
+    for jid in ops_by_j:
+        ops_by_j[jid].sort(key=lambda x: x["op_id"])
+    dec = Dec(ops_by_j, m_case, c_case, 1.0)
+    dec.eval_ind(ph_sol)
+    alns_engine = Alns(ops, m_case, c_case, 1.0)
+    alns_sol = alns_engine.run(ph_sol, max_t=alns_time_seconds, max_it=alns_iterations, stagn=alns_no_improvement_limit, record_h=True, verbose=verbose, show_pr=show_progress, pr_desc=f"ALNS {seed}")
+    dec.eval_ind(alns_sol)
+    res = {
         "case_file": case_file,
         "seed": seed,
-        "PH_fitness": ph_solution.fit,
-        "PH_tardiness": ph_solution.tard,
-        "PH_setups": ph_solution.su,
-        "PH_runtime": ph_runtime,
-        "ALNS_fitness": alns_solution.fit,
-        "ALNS_tardiness": alns_solution.tard,
-        "ALNS_setups": alns_solution.su,
-        "ALNS_runtime": alns_solution.alns_rt,
-        "ALNS_iterations": alns_solution.alns_it,
-        "ALNS_stop": alns_solution.alns_stop,
-        "ALNS_cache_hits": getattr(alns_solution, "hits", None),
-        "ALNS_cache_misses": getattr(alns_solution, "miss", None),
-        "Improvement_vs_PH_%": ((alns_solution.fit - ph_solution.fit) / max(1.0, ph_solution.fit)) * 100.0,
+        "PH_fitness": ph_sol.fit,
+        "PH_tardiness": ph_sol.tard,
+        "PH_setups": ph_sol.su,
+        "PH_runtime": ph_rt,
+        "ALNS_fitness": alns_sol.fit,
+        "ALNS_tardiness": alns_sol.tard,
+        "ALNS_setups": alns_sol.su,
+        "ALNS_runtime": alns_sol.alns_rt,
+        "ALNS_iterations": alns_sol.alns_it,
+        "ALNS_stop": alns_sol.alns_stop,
+        "ALNS_cache_hits": getattr(alns_sol, "hits", None),
+        "ALNS_cache_misses": getattr(alns_sol, "miss", None),
+        "Improvement_vs_PH_%": ((alns_sol.fit - ph_sol.fit) / max(1.0, ph_sol.fit)) * 100.0,
     }
-    return alns_solution, result
+    return alns_sol, res
 
-def run_alns_table8_replications(num_runs=10, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True):
-    print("\n[REPLICATION: TABLE 8 - Operational Scaling Framework on 6M140]")
+def run_alns_table8_replications(num_runs=10, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500):
     case_file = resolve_kmwe_case_file("6M140")
-    full_jobs_data, m_val, c_val = load_actual_kmwe_instance(case_file)
-    df_sorted = pd.DataFrame(full_jobs_data).sort_values(by="r").copy()
-    rows = []
-    table8_seed_records = []
-    n_values = [15, 25, 30, 60, 90, 120, 140]
-    n_iterator = tqdm(n_values, desc="Table 8 n-slices", disable=not show_progress)
-    for n_slice in n_iterator:
-        n_iterator.set_postfix(n=n_slice)
+    full_ops, m_val, c_val = load_actual_kmwe_instance(case_file)
+    df_sorted = pd.DataFrame(full_ops).sort_values(by="r").copy()
+    records = []
+    slices = [15, 25, 30, 60, 90, 120, 140]
+    for n_slice in tqdm(slices, desc="Table 8 slices"):
         sliced_ops = df_sorted.head(n_slice).to_dict(orient="records")
-        records = []
-        seed_iterator = tqdm(range(num_runs), desc=f"Seeds n={n_slice}", leave=False, disable=not show_progress)
-        for seed in seed_iterator:
+        for seed in tqdm(range(num_runs), desc=f"Table 8 n={n_slice}", leave=False):
             random.seed(seed)
             np.random.seed(seed)
-            TL_SIZES.clear()
+            TL_SZ.clear()
             for op in sliced_ops:
-                TL_SIZES[op["tool_set"]] = op["size"]
+                TL_SZ[op["tool_set"]] = op["size"]
             t0 = time.time()
             ph_engine = PracHeur(sliced_ops, m_val, c_val)
-            ph_solution = ph_engine.run()
-            ph_runtime = time.time() - t0
-            ops_by_job = {}
+            ph_sol = ph_engine.run()
+            ph_rt = time.time() - t0
+            ops_by_j = {}
             for op in sliced_ops:
                 jid = int(op["job_id"])
-                ops_by_job.setdefault(jid, []).append(op)
-            for jid in ops_by_job:
-                ops_by_job[jid].sort(key=lambda x: x["op_id"])
-            decoder = Dec(ops_by_job, m_val, c_val, SETUP_TIME)
-            decoder.eval_ind(ph_solution)
-            alns_engine = Alns(sliced_ops, m_val, c_val, SETUP_TIME)
-            alns_solution = alns_engine.run(ph_solution, max_t=alns_time_seconds, max_it=alns_iterations, stagn=alns_no_improvement_limit, record_h=True, verbose=False, show_pr=show_progress, pr_desc=f"ALNS n={n_slice} Seed={seed}")
-            decoder.eval_ind(alns_solution)
+                ops_by_j.setdefault(jid, []).append(op)
+            for jid in ops_by_j:
+                ops_by_j[jid].sort(key=lambda x: x["op_id"])
+            dec = Dec(ops_by_j, m_val, c_val, 1.0)
+            dec.eval_ind(ph_sol)
+            alns_engine = Alns(sliced_ops, m_val, c_val, 1.0)
+            alns_sol = alns_engine.run(ph_sol, max_t=alns_time_seconds, max_it=alns_iterations, stagn=alns_no_improvement_limit, record_h=True, verbose=False)
+            dec.eval_ind(alns_sol)
             records.append({
                 "n": n_slice,
                 "seed": seed,
-                "PH_fitness": ph_solution.fit,
-                "PH_tardiness": ph_solution.tard,
-                "PH_setups": ph_solution.su,
-                "PH_runtime": ph_runtime,
-                "ALNS_fitness": alns_solution.fit,
-                "ALNS_tardiness": alns_solution.tard,
-                "ALNS_setups": alns_solution.su,
-                "ALNS_runtime": alns_solution.alns_rt,
-                "ALNS_iterations": alns_solution.alns_it,
-                "ALNS_stop": alns_solution.alns_stop,
-                "ALNS_cache_hits": getattr(alns_solution, "hits", None),
-                "ALNS_cache_misses": getattr(alns_solution, "miss", None),
-                "Improvement_vs_PH_%": ((alns_solution.fit - ph_solution.fit) / max(1.0, ph_solution.fit)) * 100.0,
+                "PH_fitness": ph_sol.fit,
+                "PH_tardiness": ph_sol.tard,
+                "PH_setups": ph_sol.su,
+                "PH_runtime": ph_rt,
+                "ALNS_fitness": alns_sol.fit,
+                "ALNS_tardiness": alns_sol.tard,
+                "ALNS_setups": alns_sol.su,
+                "ALNS_runtime": alns_sol.alns_rt,
+                "ALNS_iterations": alns_sol.alns_it,
+                "ALNS_stop": alns_sol.alns_stop,
+                "ALNS_cache_hits": getattr(alns_sol, "hits", None),
+                "ALNS_cache_misses": getattr(alns_sol, "miss", None),
+                "Improvement_vs_PH_%": ((alns_sol.fit - ph_sol.fit) / max(1.0, ph_sol.fit)) * 100.0,
             })
-        table8_seed_records.extend(records)
-        ph = np.array([r["PH_fitness"] for r in records], dtype=float)
-        alns = np.array([r["ALNS_fitness"] for r in records], dtype=float)
-        rows.append({
-            "n": n_slice,
-            "PH_μ": round(float(np.mean(ph)), 2),
-            "PH_σ": round(float(np.std(ph)), 2),
-            "PH_C.T.(s)": round(float(np.mean([r["PH_runtime"] for r in records])), 3),
-            "ALNS_μ": round(float(np.mean(alns)), 2),
-            "ALNS_σ": round(float(np.std(alns)), 2),
-            "ALNS_C.T.(s)": round(float(np.mean([r["ALNS_runtime"] for r in records])), 3),
-            "ALNS_it_μ": round(float(np.mean([r["ALNS_iterations"] for r in records])), 1),
-            "Gap_ALNS_vs_PH (%)": f"{((np.mean(alns) - np.mean(ph)) / max(1.0, np.mean(ph))) * 100.0:.2f}%",
-            "ALNS_StopReasons": ",".join(sorted(set(r["ALNS_stop"] for r in records))),
-        })
-    summary = pd.DataFrame(rows)
-    return summary, pd.DataFrame(table8_seed_records)
+    return pd.DataFrame(records)
 
-def run_alns_only_replications(num_runs=10, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True):
-    print("\n[REPLICATION: TABLE 14 - Production Base-Case Workcenters]")
-    rows = []
-    table14_seed_records = []
-    case_names = ["2M38", "2M46", "6M140", "6M163"]
-    case_iterator = tqdm(case_names, desc="Table 14 cases", disable=not show_progress)
-    for case_name in case_iterator:
-        case_iterator.set_postfix(case=case_name)
+def run_alns_only_replications(num_runs=10, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500):
+    records = []
+    cases = ["2M38", "2M46", "6M140", "6M163"]
+    for case_name in tqdm(cases, desc="Table 14 base cases"):
         case_file = resolve_kmwe_case_file(case_name)
-        records = []
-        seed_iterator = tqdm(range(num_runs), desc=f"Seeds {case_name}", leave=False, disable=not show_progress)
-        for seed in seed_iterator:
-            _, result = run_alns_only_on_file(case_file, seed=seed, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, verbose=False, show_progress=show_progress)
-            result["BaseCase"] = case_name
-            result["seed"] = seed
-            records.append(result)
-        table14_seed_records.extend(records)
-        ph = np.array([r["PH_fitness"] for r in records], dtype=float)
-        alns = np.array([r["ALNS_fitness"] for r in records], dtype=float)
-        rows.append({
-            "BaseCase": case_name,
-            "PH_μ": round(float(np.mean(ph)), 2),
-            "PH_σ": round(float(np.std(ph)), 2),
-            "PH_C.T.(s)": round(float(np.mean([r["PH_runtime"] for r in records])), 3),
-            "ALNS_μ": round(float(np.mean(alns)), 2),
-            "ALNS_σ": round(float(np.std(alns)), 2),
-            "ALNS_C.T.(s)": round(float(np.mean([r["ALNS_runtime"] for r in records])), 3),
-            "ALNS_it_μ": round(float(np.mean([r["ALNS_iterations"] for r in records])), 1),
-            "Gap_ALNS_vs_PH (%)": f"{((np.mean(alns) - np.mean(ph)) / max(1.0, np.mean(ph))) * 100.0:.2f}%",
-            "ALNS_StopReasons": ",".join(sorted(set(r["ALNS_stop"] for r in records))),
-        })
-    summary = pd.DataFrame(rows)
-    return summary, pd.DataFrame(table14_seed_records)
+        for seed in tqdm(range(num_runs), desc=f"Table 14 {case_name}", leave=False):
+            _, res = run_alns_only_on_file(case_file, seed=seed, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, verbose=False)
+            res["BaseCase"] = case_name
+            res["seed"] = seed
+            records.append(res)
+    return pd.DataFrame(records)
 
-def run_all_seed_experiments_to_excel(num_runs=10, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True, output_excel="alns_ql_table8_table14_seed_results.xlsx"):
-    table8_summary, table8_seed_results = run_alns_table8_replications(num_runs=num_runs, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, show_progress=show_progress)
-    table14_summary, table14_seed_results = run_alns_only_replications(num_runs=num_runs, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, show_progress=show_progress)
-    
-    print("\n[Table 8 Summary]")
-    print(table8_summary.to_string(index=False))
-    print("\n[Table 14 Summary]")
-    print(table14_summary.to_string(index=False))
-    
-    export_seed_results_to_excel(output_excel, table8_summary=table8_summary, table8_seed_results=table8_seed_results, table14_summary=table14_summary, table14_seed_results=table14_seed_results)
-    return table8_summary, table8_seed_results, table14_summary, table14_seed_results
+def run_all_seed_experiments_to_excel(num_runs=10, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, output_excel="alns_aos_table8_table14_seed_results.xlsx"):
+    t8_res = run_alns_table8_replications(num_runs, alns_time_seconds, alns_iterations, alns_no_improvement_limit)
+    t14_res = run_alns_only_replications(num_runs, alns_time_seconds, alns_iterations, alns_no_improvement_limit)
+    export_xls(output_excel, table8_seed_results=t8_res, table14_seed_results=t14_res)
+    return t8_res, t14_res
 
 run_all_seed_experiments_to_excel(num_runs=10)
