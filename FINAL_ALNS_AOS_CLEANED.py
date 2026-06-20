@@ -658,6 +658,7 @@ def run_alns_table8_replications(num_runs=10, alns_time_seconds=600.0, alns_iter
     df_sorted = pd.DataFrame(full_ops).sort_values(by="r").copy()
     records = []
     slices = [15, 25, 30, 60, 90, 120, 140]
+    
     for n_slice in tqdm(slices, desc="Table 8 slices"):
         sliced_ops = df_sorted.head(n_slice).to_dict(orient="records")
         for seed in tqdm(range(num_runs), desc=f"Table 8 n={n_slice}", leave=False):
@@ -698,7 +699,30 @@ def run_alns_table8_replications(num_runs=10, alns_time_seconds=600.0, alns_iter
                 "ALNS_cache_misses": getattr(alns_sol, "miss", None),
                 "Improvement_vs_PH_%": ((alns_sol.fit - ph_sol.fit) / max(1.0, ph_sol.fit)) * 100.0,
             })
-    return pd.DataFrame(records)
+            
+    df_seeds = pd.DataFrame(records)
+    summary_rows = []
+    for n_slice in slices:
+        subset = df_seeds[df_seeds["n"] == n_slice]
+        ph_fits = subset["PH_fitness"].values
+        alns_fits = subset["ALNS_fitness"].values
+        summary_rows.append({
+            "n": n_slice,
+            "PH_μ": round(float(np.mean(ph_fits)), 2),
+            "PH_σ": round(float(np.std(ph_fits)), 2),
+            "PH_C.T.(s)": round(float(np.mean(subset["PH_runtime"])), 3),
+            "ALNS_μ": round(float(np.mean(alns_fits)), 2),
+            "ALNS_σ": round(float(np.std(alns_fits)), 2),
+            "ALNS_C.T.(s)": round(float(np.mean(subset["ALNS_runtime"])), 3),
+            "ALNS_it_μ": round(float(np.mean(subset["ALNS_iterations"])), 1),
+            "Gap_ALNS_vs_PH (%)": f"{((np.mean(alns_fits) - np.mean(ph_fits)) / max(1.0, np.mean(ph_fits))) * 100.0:.2f}%",
+            "ALNS_StopReasons": ",".join(sorted(set(subset["ALNS_stop"]))),
+        })
+        
+    summary_df = pd.DataFrame(summary_rows)
+    print("\n  ALNS-ONLY TABLE 8 SUMMARY")
+    print(summary_df.to_string(index=False))
+    return df_seeds
 
 def run_alns_only_replications(num_runs=10, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500):
     records = []
@@ -710,7 +734,30 @@ def run_alns_only_replications(num_runs=10, alns_time_seconds=600.0, alns_iterat
             res["BaseCase"] = case_name
             res["seed"] = seed
             records.append(res)
-    return pd.DataFrame(records)
+            
+    df_seeds = pd.DataFrame(records)
+    summary_rows = []
+    for case_name in cases:
+        subset = df_seeds[df_seeds["BaseCase"] == case_name]
+        ph_fits = subset["PH_fitness"].values
+        alns_fits = subset["ALNS_fitness"].values
+        summary_rows.append({
+            "BaseCase": case_name,
+            "PH_μ": round(float(np.mean(ph_fits)), 2),
+            "PH_σ": round(float(np.std(ph_fits)), 2),
+            "PH_C.T.(s)": round(float(np.mean(subset["PH_runtime"])), 3),
+            "ALNS_μ": round(float(np.mean(alns_fits)), 2),
+            "ALNS_σ": round(float(np.std(alns_fits)), 2),
+            "ALNS_C.T.(s)": round(float(np.mean(subset["ALNS_runtime"])), 3),
+            "ALNS_it_μ": round(float(np.mean(subset["ALNS_iterations"])), 1),
+            "Gap_ALNS_vs_PH (%)": f"{((np.mean(alns_fits) - np.mean(ph_fits)) / max(1.0, np.mean(ph_fits))) * 100.0:.2f}%",
+            "ALNS_StopReasons": ",".join(sorted(set(subset["ALNS_stop"]))),
+        })
+        
+    summary_df = pd.DataFrame(summary_rows)
+    print("\n ALNS-ONLY TABLE 14 SUMMARY")
+    print(summary_df.to_string(index=False))
+    return df_seeds
 
 def run_all_seed_experiments_to_excel(num_runs=10, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, output_excel="alns_aos_table8_table14_seed_results.xlsx"):
     t8_res = run_alns_table8_replications(num_runs, alns_time_seconds, alns_iterations, alns_no_improvement_limit)
