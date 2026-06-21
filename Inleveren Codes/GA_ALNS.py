@@ -3,8 +3,10 @@ import random
 import time
 import numpy as np
 import pandas as pd
+
 from tqdm.auto import tqdm
 
+# Unified global tool registry
 TL_SIZES = {}
 
 def _safe_sh(name):
@@ -29,6 +31,7 @@ def export_seed_results_to_excel(path, **sheets):
     print(f"\n[Export] Results written to: {path}")
     return path
 
+# Settings
 B = 1
 POP_SIZE = 100
 ELITISM_RATE = 0.10
@@ -762,7 +765,7 @@ def run_alns_only_replications(num_runs=10, alns_time_seconds=600.0, alns_iterat
     print(summary.to_string(index=False))
     return summary
 
-def apmx_t(p1, p2):
+def apmx_trans(p1, p2):
     p1_occ = {}
     mapping = {}
     for i, job in enumerate(p1):
@@ -777,7 +780,7 @@ def apmx_t(p1, p2):
         tp2.append(mapping[(job, occ)])
     return list(range(1, len(p1) + 1)), tp2
 
-def pmx_c(p1, p2):
+def pmx_cross(p1, p2):
     n = len(p1)
     cx1 = random.randint(0, n - 2)
     cx2 = random.randint(cx1 + 1, n - 1)
@@ -798,7 +801,7 @@ def pmx_c(p1, p2):
             child2[i] = val2
     return child1, child2, cx1, cx2
 
-def pox_edd(job_vector, cx1, cx2, ops_by_job):
+def pox_edd_apply(job_vector, cx1, cx2, ops_by_job):
     n = len(job_vector)
     occ_counts = {}
     outside_elements = []
@@ -814,7 +817,7 @@ def pox_edd(job_vector, cx1, cx2, ops_by_job):
         new_job_vector[idx] = job
     return new_job_vector
 
-def pox_mach(job_vector, ops_by_job, num_machines, magazine_capacity):
+def pox_mach_build(job_vector, ops_by_job, num_machines, magazine_capacity):
     Tm = {m: set() for m in range(1, num_machines + 1)}
     p_m = {m: 0.0 for m in range(1, num_machines + 1)}
     mach_vec = []
@@ -839,97 +842,129 @@ def pox_mach(job_vector, ops_by_job, num_machines, magazine_capacity):
     return mach_vec
 
 class MathGA:
-    def __init__(self, jobs, nm, cap, tau=SETUP_TIME):
-        self.num_m, self.C, self.tau, self.jobs = nm, cap, tau, jobs
-        self.ops_by_j, self.flat_ops = {}, []
-        for op in jobs:
-            jid = int(op["job_id"])
-            self.ops_by_j.setdefault(jid, []).append(op)
-            self.flat_ops.append(jid)
-        for j in self.ops_by_j:
-            self.ops_by_j[j].sort(key=lambda x: x["op_id"])
-        self.decoder = Dec(self.ops_by_j, nm, cap, tau)
+    def __init__(self, jobs_data, num_m, cap, setup_time=SETUP_TIME):
+        self.num_m = num_m
+        self.C = cap
+        self.tau = setup_time
+        self.jobs_data = jobs_data
+        self.ops_by_j = {}
+        self.flat_ops = []
+        for op in jobs_data:
+            job_id = int(op["job_id"])
+            self.ops_by_j.setdefault(job_id, []).append(op)
+            self.flat_ops.append(job_id)
+        for job_id in self.ops_by_j:
+            self.ops_by_j[job_id].sort(key=lambda x: x["op_id"])
+        self.decoder = Dec(self.ops_by_j, self.num_m, self.C, self.tau)
 
-    def run(self, max_t=MAX_TIME_SECONDS, stagn=NO_IMPROVEMENT_LIMIT, pop_sz=POP_SIZE, t_rate=TOURNAMENT_RATE, elite_r=ELITISM_RATE, p_swap=SWAP_MUTATION_PROB, p_uni=UNIFORM_MUTATION_PROB, pox_it=B, max_g=None, rec_h=True, verbose=False):
-        pop = []
-        ph = PracHeur(self.jobs, self.num_m, self.C, self.tau).run()
-        self.decoder.eval_ind(ph)
-        pop.append(ph)
+    def run(self, max_time_seconds=MAX_TIME_SECONDS, no_improvement_limit=NO_IMPROVEMENT_LIMIT, pop_size=POP_SIZE, tournament_rate=TOURNAMENT_RATE, elitism_rate=ELITISM_RATE, swap_mutation_prob=SWAP_MUTATION_PROB, uniform_mutation_prob=UNIFORM_MUTATION_PROB, pox_iterations=B, max_generations=None, record_history=True, verbose=False):
+        population = []
+        ph_engine = PracHeur(self.jobs_data, self.num_m, self.C, self.tau)
+        ph_baseline = ph_engine.run()
+        self.decoder.eval_ind(ph_baseline)
+        population.append(ph_baseline)
         n_ops = len(self.flat_ops)
-        for _ in range(pop_sz - 1):
-            jv = list(self.flat_ops)
-            random.shuffle(jv)
-            mv = [random.randint(1, self.num_m) for _ in range(n_ops)]
-            ind = Ind(jv, mv)
+        for _ in range(pop_size - 1):
+            rand_job_vec = list(self.flat_ops)
+            random.shuffle(rand_job_vec)
+            rand_mach_vec = [random.randint(1, self.num_m) for _ in range(n_ops)]
+            ind = Ind(rand_job_vec, rand_mach_vec)
             self.decoder.eval_ind(ind)
-            pop.append(ind)
-        best_ind = min(pop, key=lambda x: x.fit)
-        f_best, no_imp, q, best_imp, gen = best_ind.fit, 0, pox_it + 1, False, 0
-        t0 = time.time()
-        hist = []
-        if rec_h:
-            hist.append({"generation": 0, "runtime": 0.0, "best_fitness": float(f_best), "current_best": float(f_best), "no_improve": 0, "used_pox": False, "improved": True})
+            population.append(ind)
+        best_ind = min(population, key=lambda x: x.fit)
+        f_best = best_ind.fit
+        no_improve = 0
+        q = pox_iterations + 1
+        best_improved = False
+        generation = 0
+        start_clock = time.time()
+        history = []
+        stop_reason = None
+        if record_history:
+            history.append({"generation": 0, "runtime": 0.0, "best_fitness": float(f_best), "current_best": float(f_best), "no_improve": 0, "used_pox": False, "improved": True})
         while True:
-            elap = time.time() - t0
-            if elap >= max_t or no_imp >= stagn or (max_g is not None and gen >= max_g):
+            elapsed = time.time() - start_clock
+            if elapsed >= max_time_seconds:
+                stop_reason = "time_limit"
                 break
-            off = []
-            use_pox = best_imp or q <= pox_it
-            while len(off) < pop_sz:
-                p1, p2 = self.select_parents(pop, t_rate)
+            if no_improve >= no_improvement_limit:
+                stop_reason = "no_improvement_limit"
+                break
+            if max_generations is not None and generation >= max_generations:
+                stop_reason = "debug_generation_limit"
+                break
+            offspring = []
+            use_pox = best_improved or q <= pox_iterations
+            while len(offspring) < pop_size:
+                p1, p2 = self.select_parents(population, tournament_rate)
                 if use_pox:
-                    tp1, tp2 = apmx_t(p1.jv, p2.jv)
-                    tc1, tc2, cx1, cx2 = pmx_c(tp1, tp2)
-                    c1j = pox_edd([p1.jv[v - 1] for v in tc1], cx1, cx2, self.ops_by_j)
-                    c2j = pox_edd([p1.jv[v - 1] for v in tc2], cx1, cx2, self.ops_by_j)
-                    c1m = pox_mach(c1j, self.ops_by_j, self.num_m, self.C)
-                    c2m = pox_mach(c2j, self.ops_by_j, self.num_m, self.C)
+                    tp1, tp2 = apmx_trans(p1.jv, p2.jv)
+                    tc1, tc2, cx1, cx2 = pmx_cross(tp1, tp2)
+                    c1_job = [p1.jv[v - 1] for v in tc1]
+                    c2_job = [p1.jv[v - 1] for v in tc2]
+                    c1_job = pox_edd_apply(c1_job, cx1, cx2, self.ops_by_j)
+                    c2_job = pox_edd_apply(c2_job, cx1, cx2, self.ops_by_j)
+                    c1_mach = pox_mach_build(c1_job, self.ops_by_j, self.num_m, self.C)
+                    c2_mach = pox_mach_build(c2_job, self.ops_by_j, self.num_m, self.C)
                 else:
-                    tp1, tp2 = apmx_t(p1.jv, p2.jv)
-                    tc1, tc2, _, _ = pmx_c(tp1, tp2)
-                    c1j = [p1.jv[v - 1] for v in tc1]
-                    c2j = [p1.jv[v - 1] for v in tc2]
-                    c1m, c2m = self.two_point_crossover(p1.mv, p2.mv)
-                child1, child2 = Ind(c1j, c1m), Ind(c2j, c2m)
-                self.apply_mutation(child1, p_swap, p_uni)
-                self.apply_mutation(child2, p_swap, p_uni)
+                    tp1, tp2 = apmx_trans(p1.jv, p2.jv)
+                    tc1, tc2, _, _ = pmx_cross(tp1, tp2)
+                    c1_job = [p1.jv[v - 1] for v in tc1]
+                    c2_job = [p1.jv[v - 1] for v in tc2]
+                    c1_mach, c2_mach = self.two_point_crossover(p1.mv, p2.mv)
+                child1, child2 = Ind(c1_job, c1_mach), Ind(c2_job, c2_mach)
+                self.apply_mutation(child1, swap_mutation_prob, uniform_mutation_prob)
+                self.apply_mutation(child2, swap_mutation_prob, uniform_mutation_prob)
                 self.decoder.eval_ind(child1)
                 self.decoder.eval_ind(child2)
-                off.extend([child1, child2])
-            off = off[:pop_sz]
-            se = int(elite_r * pop_sz)
-            elites = sorted(pop, key=lambda x: x.fit)[:se]
-            n_pop = off[:]
+                offspring.extend([child1, child2])
+            offspring = offspring[:pop_size]
+            se = int(elitism_rate * pop_size)
+            parents_elite = sorted(population, key=lambda x: x.fit)[:se]
+            next_pop = offspring[:]
             if se > 0:
-                for idx, el in zip(random.sample(range(pop_sz), se), elites):
-                    n_pop[idx] = el
-            u_sigs = set()
-            f_pop = []
-            for ind in n_pop:
+                replace_idx = random.sample(range(pop_size), se)
+                for idx, elite in zip(replace_idx, parents_elite):
+                    next_pop[idx] = elite
+            unique_signatures = set()
+            final_pop = []
+            for ind in next_pop:
                 sig = ind.sig()
-                if sig not in u_sigs:
-                    u_sigs.add(sig)
-                    f_pop.append(ind)
+                if sig not in unique_signatures:
+                    unique_signatures.add(sig)
+                    final_pop.append(ind)
                 else:
-                    imm_jv = list(self.flat_ops)
-                    random.shuffle(imm_jv)
-                    imm_mv = [random.randint(1, self.num_m) for _ in range(n_ops)]
-                    imm = Ind(imm_jv, imm_mv)
-                    self.decoder.eval_ind(imm)
-                    f_pop.append(imm)
-            pop = f_pop
-            cur_best = min(pop, key=lambda x: x.fit)
-            imp = cur_best.fit < f_best
-            if imp:
-                f_best, best_ind, best_imp, q, no_imp = cur_best.fit, cur_best, True, 1, 0
+                    rand_job_vec = list(self.flat_ops)
+                    random.shuffle(rand_job_vec)
+                    rand_mach_vec = [random.randint(1, self.num_m) for _ in range(n_ops)]
+                    immigrant = Ind(rand_job_vec, rand_mach_vec)
+                    self.decoder.eval_ind(immigrant)
+                    final_pop.append(immigrant)
+            population = final_pop
+            current_best = min(population, key=lambda x: x.fit)
+            improved = current_best.fit < f_best
+            if improved:
+                f_best = current_best.fit
+                best_ind = current_best
+                best_improved = True
+                q = 1
+                no_improve = 0
             else:
-                best_imp, q, no_imp = False, q + 1, no_imp + 1
-            gen += 1
-            if rec_h:
-                hist.append({"generation": gen, "runtime": float(time.time() - t0), "best_fitness": float(f_best), "current_best": float(cur_best.fit), "no_improve": int(no_imp), "used_pox": bool(use_pox), "improved": bool(imp)})
-        best_ind.generations = gen
-        best_ind.runtime = time.time() - t0
-        best_ind.history = hist
+                best_improved = False
+                q += 1
+                no_improve += 1
+            generation += 1
+            elapsed = time.time() - start_clock
+            if record_history:
+                history.append({"generation": generation, "runtime": float(elapsed), "best_fitness": float(f_best), "current_best": float(current_best.fit), "no_improve": int(no_improve), "used_pox": bool(use_pox), "improved": bool(improved)})
+            if verbose:
+                print(f"gen={generation:4d} best={f_best:.4f} current={current_best.fit:.4f} no_improve={no_improve:2d} pox={use_pox} time={elapsed:.2f}s")
+        if stop_reason is None:
+            stop_reason = "unknown"
+        best_ind.generations = generation
+        best_ind.runtime = time.time() - start_clock
+        best_ind.stop_reason = stop_reason
+        best_ind.history = history
         return best_ind
 
     def select_parents(self, population, tournament_rate):
@@ -954,298 +989,488 @@ class MathGA:
             if random.random() < Pu:
                 individual.mv[idx] = random.randint(1, self.num_m)
 
-def clone_i(ind):
-    n = Ind(ind.jv, ind.mv)
-    n.fit = float(getattr(ind, "fit", float("inf")))
-    n.tard = float(getattr(ind, "tard", 0.0))
-    n.su = int(getattr(ind, "su", 0))
-    for a in ["runtime", "generations", "su_pos", "alns_iterations", "alns_runtime", "alns_stop_reason", "alns_history", "alns_destroy_weights", "alns_repair_weights", "alns_eval_cache_hits", "alns_eval_cache_misses", "source_label", "source_rank", "source_diversity"]:
-        if hasattr(ind, a):
-            setattr(n, a, getattr(ind, a))
-    return n
+def clone_individual(ind):
+    new = Ind(ind.jv, ind.mv)
+    new.fit = float(getattr(ind, "fit", float("inf")))
+    new.tard = float(getattr(ind, "tard", 0.0))
+    new.su = int(getattr(ind, "su", 0))
+    for attr in ["runtime", "generations", "stop_reason", "history", "su_pos", "alns_iterations", "alns_runtime", "alns_stop_reason", "alns_history", "alns_destroy_weights", "alns_repair_weights", "alns_eval_cache_hits", "alns_eval_cache_misses", "source_label", "source_rank", "source_diversity"]:
+        if hasattr(ind, attr):
+            setattr(new, attr, getattr(ind, attr))
+    return new
 
-def uq_sort(inds):
-    uq = {}
-    for ind in inds:
+def unique_sorted_individuals(individuals):
+    unique = {}
+    for ind in individuals:
         sig = ind.sig()
-        if sig not in uq or ind.fit < uq[sig].fit:
-            uq[sig] = clone_i(ind)
-    return sorted(uq.values(), key=lambda x: (x.fit, x.tard, x.su))
+        if sig not in unique or ind.fit < unique[sig].fit:
+            unique[sig] = clone_individual(ind)
+    return sorted(unique.values(), key=lambda x: (x.fit, x.tard, x.su))
 
-def sel_best(arch):
-    r = uq_sort(arch)
-    if not r:
-        raise ValueError()
-    b = clone_i(r[0])
-    b.source_rank, b.source_label, b.source_diversity = 1, "GA_best", 0.0
-    return [b]
+def select_best_ga_solution(archive):
+    ranked = unique_sorted_individuals(archive)
+    if not ranked:
+        raise ValueError("Cannot select GA solution: archive is empty.")
+    best = clone_individual(ranked[0])
+    best.source_rank = 1
+    best.source_label = "GA_best"
+    best.source_diversity = 0.0
+    return [best]
 
-class MHArch(MathGA):
-    def run_arch(self, max_t=MAX_TIME_SECONDS, stagn=NO_IMPROVEMENT_LIMIT, pop_sz=POP_SIZE, t_rate=TOURNAMENT_RATE, elite_r=ELITISM_RATE, p_swap=SWAP_MUTATION_PROB, p_uni=UNIFORM_MUTATION_PROB, pox_it=B, max_g=None, rec_h=True, verbose=False, top_g=25, show_pr=False, pr_desc="GA/MH"):
-        pop, arch = [], []
-        ph = PracHeur(self.jobs, self.num_m, self.C, self.tau).run()
-        self.decoder.eval_ind(ph)
-        pop.append(ph)
-        arch.append(clone_i(ph))
+class MatheuristicWithArchive(MathGA):
+    def run_with_archive(self, max_time_seconds=MAX_TIME_SECONDS, no_improvement_limit=NO_IMPROVEMENT_LIMIT, pop_size=POP_SIZE, tournament_rate=TOURNAMENT_RATE, elitism_rate=ELITISM_RATE, swap_mutation_prob=SWAP_MUTATION_PROB, uniform_mutation_prob=UNIFORM_MUTATION_PROB, pox_iterations=B, max_generations=None, record_history=True, verbose=False, archive_top_per_generation=25, show_progress=False, progress_desc="GA/MH"):
+        population = []
+        archive = []
+        ph_engine = PracHeur(self.jobs_data, self.num_m, self.C, self.tau)
+        ph_baseline = ph_engine.run()
+        self.decoder.eval_ind(ph_baseline)
+        population.append(ph_baseline)
+        archive.append(clone_individual(ph_baseline))
         n_ops = len(self.flat_ops)
-        for _ in range(pop_sz - 1):
-            jv = list(self.flat_ops)
-            random.shuffle(jv)
-            mv = [random.randint(1, self.num_m) for _ in range(n_ops)]
-            ind = Ind(jv, mv)
+        for _ in range(pop_size - 1):
+            rand_job_vec = list(self.flat_ops)
+            random.shuffle(rand_job_vec)
+            rand_mach_vec = [random.randint(1, self.num_m) for _ in range(n_ops)]
+            ind = Ind(rand_job_vec, rand_mach_vec)
             self.decoder.eval_ind(ind)
-            pop.append(ind)
-        arch.extend(clone_i(x) for x in sorted(pop, key=lambda x: x.fit)[:top_g])
-        best_ind = min(pop, key=lambda x: x.fit)
-        f_best, no_imp, q, best_imp, gen = best_ind.fit, 0, pox_it + 1, False, 0
-        t0 = time.time()
-        hist = []
-        pbar = tqdm(total=max_g, desc=pr_desc, leave=False, disable=not show_pr)
-        if rec_h:
-            hist.append({"generation": 0, "runtime": 0.0, "best_fitness": float(f_best), "current_best": float(f_best), "no_improve": 0, "used_pox": False, "improved": True, "archive_size": len(uq_sort(arch))})
+            population.append(ind)
+        archive.extend(clone_individual(ind) for ind in sorted(population, key=lambda x: x.fit)[:archive_top_per_generation])
+        best_ind = min(population, key=lambda x: x.fit)
+        f_best = best_ind.fit
+        no_improve = 0
+        q = pox_iterations + 1
+        best_improved = False
+        generation = 0
+        start_clock = time.time()
+        history = []
+        stop_reason = None
+        pbar = tqdm(total=max_generations if max_generations is not None else None, desc=progress_desc, leave=False, disable=not show_progress)
+        if record_history:
+            history.append({"generation": 0, "runtime": 0.0, "best_fitness": float(f_best), "current_best": float(f_best), "no_improve": 0, "used_pox": False, "improved": True, "archive_size": len(unique_sorted_individuals(archive))})
         while True:
-            elap = time.time() - t0
-            if elap >= max_t or no_imp >= stagn or (max_g is not None and gen >= max_g):
+            elapsed = time.time() - start_clock
+            if elapsed >= max_time_seconds:
+                stop_reason = "time_limit"
                 break
-            off = []
-            use_pox = best_imp or q <= pox_it
-            while len(off) < pop_sz:
-                p1, p2 = self.select_parents(pop, t_rate)
+            if no_improve >= no_improvement_limit:
+                stop_reason = "no_improvement_limit"
+                break
+            if max_generations is not None and generation >= max_generations:
+                stop_reason = "debug_generation_limit"
+                break
+            offspring = []
+            use_pox = best_improved or q <= pox_iterations
+            while len(offspring) < pop_size:
+                p1, p2 = self.select_parents(population, tournament_rate)
                 if use_pox:
-                    tp1, tp2 = apmx_t(p1.jv, p2.jv)
-                    tc1, tc2, cx1, cx2 = pmx_c(tp1, tp2)
-                    c1j = pox_edd([p1.jv[v - 1] for v in tc1], cx1, cx2, self.ops_by_j)
-                    c2j = pox_edd([p1.jv[v - 1] for v in tc2], cx1, cx2, self.ops_by_j)
-                    c1m = pox_mach(c1j, self.ops_by_j, self.num_m, self.C)
-                    c2m = pox_mach(c2j, self.ops_by_j, self.num_m, self.C)
+                    tp1, tp2 = apmx_trans(p1.jv, p2.jv)
+                    tc1, tc2, cx1, cx2 = pmx_cross(tp1, tp2)
+                    c1_job = [p1.jv[v - 1] for v in tc1]
+                    c2_job = [p1.jv[v - 1] for v in tc2]
+                    c1_job = pox_edd_apply(c1_job, cx1, cx2, self.ops_by_j)
+                    c2_job = pox_edd_apply(c2_job, cx1, cx2, self.ops_by_j)
+                    c1_mach = pox_mach_build(c1_job, self.ops_by_j, self.num_m, self.C)
+                    c2_mach = pox_mach_build(c2_job, self.ops_by_j, self.num_m, self.C)
                 else:
-                    tp1, tp2 = apmx_t(p1.jv, p2.jv)
-                    tc1, tc2, _, _ = pmx_c(tp1, tp2)
-                    c1j = [p1.jv[v - 1] for v in tc1]
-                    c2j = [p1.jv[v - 1] for v in tc2]
-                    c1m, c2m = self.two_point_crossover(p1.mv, p2.mv)
-                ch1, ch2 = Ind(c1j, c1m), Ind(c2j, c2m)
-                self.apply_mutation(ch1, p_swap, p_uni)
-                self.apply_mutation(ch2, p_swap, p_uni)
-                self.decoder.eval_ind(ch1)
-                self.decoder.eval_ind(ch2)
-                off.extend([ch1, ch2])
-            off = off[:pop_sz]
-            se = int(elite_r * pop_sz)
-            elites = sorted(pop, key=lambda x: x.fit)[:se]
-            n_pop = off[:]
+                    tp1, tp2 = apmx_trans(p1.jv, p2.jv)
+                    tc1, tc2, _, _ = pmx_cross(tp1, tp2)
+                    c1_job = [p1.jv[v - 1] for v in tc1]
+                    c2_job = [p1.jv[v - 1] for v in tc2]
+                    c1_mach, c2_mach = self.two_point_crossover(p1.mv, p2.mv)
+                child1, child2 = Ind(c1_job, c1_mach), Ind(c2_job, c2_mach)
+                self.apply_mutation(child1, swap_mutation_prob, uniform_mutation_prob)
+                self.apply_mutation(child2, swap_mutation_prob, uniform_mutation_prob)
+                self.decoder.eval_ind(child1)
+                self.decoder.eval_ind(child2)
+                offspring.extend([child1, child2])
+            offspring = offspring[:pop_size]
+            se = int(elitism_rate * pop_size)
+            parents_elite = sorted(population, key=lambda x: x.fit)[:se]
+            next_pop = offspring[:]
             if se > 0:
-                for idx, el in zip(random.sample(range(pop_sz), se), elites):
-                    n_pop[idx] = el
-            u_sigs = set()
-            f_pop = []
-            for ind in n_pop:
+                replace_idx = random.sample(range(pop_size), se)
+                for idx, elite in zip(replace_idx, parents_elite):
+                    next_pop[idx] = elite
+            unique_signatures = set()
+            final_pop = []
+            for ind in next_pop:
                 sig = ind.sig()
-                if sig not in u_sigs:
-                    u_sigs.add(sig)
-                    f_pop.append(ind)
+                if sig not in unique_signatures:
+                    unique_signatures.add(sig)
+                    final_pop.append(ind)
                 else:
-                    imm_jv = list(self.flat_ops)
-                    random.shuffle(imm_jv)
-                    imm_mv = [random.randint(1, self.num_m) for _ in range(n_ops)]
-                    imm = Ind(imm_jv, imm_mv)
-                    self.decoder.eval_ind(imm)
-                    f_pop.append(imm)
-            pop = f_pop
-            arch.extend(clone_i(x) for x in sorted(pop, key=lambda x: x.fit)[:top_g])
-            cur_best = min(pop, key=lambda x: x.fit)
-            imp = cur_best.fit < f_best
-            if imp:
-                f_best, best_ind, best_imp, q, no_imp = cur_best.fit, cur_best, True, 1, 0
+                    rand_job_vec = list(self.flat_ops)
+                    random.shuffle(rand_job_vec)
+                    rand_mach_vec = [random.randint(1, self.num_m) for _ in range(n_ops)]
+                    immigrant = Ind(rand_job_vec, rand_mach_vec)
+                    self.decoder.eval_ind(immigrant)
+                    final_pop.append(immigrant)
+            population = final_pop
+            archive.extend(clone_individual(ind) for ind in sorted(population, key=lambda x: x.fit)[:archive_top_per_generation])
+            current_best = min(population, key=lambda x: x.fit)
+            improved = current_best.fit < f_best
+            if improved:
+                f_best = current_best.fit
+                best_ind = current_best
+                best_improved = True
+                q = 1
+                no_improve = 0
             else:
-                best_imp, q, no_imp = False, q + 1, no_imp + 1
-            gen += 1
-            if show_pr:
+                best_improved = False
+                q += 1
+                no_improve += 1
+            generation += 1
+            elapsed = time.time() - start_clock
+            if show_progress:
                 pbar.update(1)
-                pbar.set_postfix(best=round(float(f_best), 2), noimp=int(no_imp), arch=len(uq_sort(arch)))
-            if rec_h:
-                hist.append({"generation": gen, "runtime": float(time.time() - t0), "best_fitness": float(f_best), "current_best": float(cur_best.fit), "no_improve": int(no_imp), "used_pox": bool(use_pox), "improved": bool(imp), "archive_size": len(uq_sort(arch))})
+                pbar.set_postfix(best=round(float(f_best), 2), noimp=int(no_improve), archive=len(unique_sorted_individuals(archive)))
+            if record_history:
+                history.append({"generation": generation, "runtime": float(elapsed), "best_fitness": float(f_best), "current_best": float(current_best.fit), "no_improve": int(no_improve), "used_pox": bool(use_pox), "improved": bool(improved), "archive_size": len(unique_sorted_individuals(archive))})
+            if verbose:
+                print(f"gen={generation:4d} best={f_best:.4f} current={current_best.fit:.4f} no_improve={no_improve:2d} pox={use_pox} time={elapsed:.2f}s archive={len(unique_sorted_individuals(archive))}")
         pbar.close()
-        best_ind = clone_i(best_ind)
-        best_ind.generations = gen
-        best_ind.runtime = time.time() - t0
-        best_ind.history = hist
-        best_ind.ga_archive = uq_sort(arch)
+        if stop_reason is None:
+            stop_reason = "unknown"
+        best_ind = clone_individual(best_ind)
+        best_ind.generations = generation
+        best_ind.runtime = time.time() - start_clock
+        best_ind.stop_reason = stop_reason
+        best_ind.history = history
+        best_ind.ga_archive = unique_sorted_individuals(archive)
         return best_ind, best_ind.ga_archive
 
-def get_ops_j(jobs):
-    o = {}
-    for op in jobs:
-        o.setdefault(int(op["job_id"]), []).append(op)
-    for j in o:
-        o[j].sort(key=lambda x: x["op_id"])
-    return o
+def build_ops_by_job(jobs_data):
+    ops_by_job = {}
+    for op in jobs_data:
+        job_id = int(op["job_id"])
+        ops_by_job.setdefault(job_id, []).append(op)
+    for job_id in ops_by_job:
+        ops_by_job[job_id].sort(key=lambda x: x["op_id"])
+    return ops_by_job
 
-def run_hybrid_d(jobs, nm, cap, lbl="custom", is_f=False, seed=0, mh_t=MAX_TIME_SECONDS, mh_st=NO_IMPROVEMENT_LIMIT, pop_sz=POP_SIZE, max_g=None, alns_t=600.0, alns_it=2000, alns_st=500, rst_seed=True, verbose=False, show_pr=True):
+def run_ph_mh_alns_aos_on_file(case_file, seed=0, mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, reset_seed_per_alns_start=True, verbose=False, show_progress=True):
+    random.seed(seed)
+    np.random.seed(seed)
+    jobs_data, m_case, c_case = load_actual_kmwe_instance(case_file)
+    ops_by_job = build_ops_by_job(jobs_data)
+    decoder = Dec(ops_by_job, m_case, c_case, SETUP_TIME)
+    t0 = time.time()
+    ph_engine = PracHeur(jobs_data, m_case, c_case)
+    ph_solution = ph_engine.run()
+    decoder.eval_ind(ph_solution)
+    ph_runtime = time.time() - t0
+    mh_engine = MatheuristicWithArchive(jobs_data, m_case, c_case)
+    mh_solution, ga_archive = mh_engine.run_with_archive(max_time_seconds=mh_time_seconds, no_improvement_limit=mh_no_improvement_limit, pop_size=mh_pop_size, max_generations=mh_max_generations, record_history=True, verbose=verbose, show_progress=show_progress, progress_desc=f"ALNS-only seed={seed}")
+    decoder.eval_ind(mh_solution)
+    starts = select_best_ga_solution(ga_archive)
+    alns_results = []
+    start_iterator = tqdm(list(enumerate(starts, start=1)), desc=f"ALNS starts seed={seed}", leave=False, disable=not show_progress)
+    for idx, start_ind in start_iterator:
+        if reset_seed_per_alns_start:
+            alns_seed = seed * 1000 + idx
+            random.seed(alns_seed)
+            np.random.seed(alns_seed)
+        start_ind = clone_individual(start_ind)
+        decoder.eval_ind(start_ind)
+        if show_progress:
+            start_iterator.set_postfix(start=getattr(start_ind, "source_label", f"GA_start_{idx}"), fit=round(float(start_ind.fit), 2))
+        alns_engine = Alns(jobs_data, m_case, c_case, SETUP_TIME)
+        alns_solution = alns_engine.run(start_ind, max_it=alns_iterations, max_t=alns_time_seconds, stagn=alns_no_improvement_limit, record_h=True, show_pr=show_progress, pr_desc=f"ALNS seed={seed} start={idx}/{len(starts)}")
+        decoder.eval_ind(alns_solution)
+        alns_solution.start_label = getattr(start_ind, "source_label", f"GA_start_{idx}")
+        alns_solution.start_rank = idx
+        alns_solution.start_fitness = float(start_ind.fit)
+        alns_solution.start_tardiness = float(start_ind.tard)
+        alns_solution.start_setups = int(start_ind.su)
+        alns_solution.start_diversity = float(getattr(start_ind, "source_diversity", 0.0))
+        alns_results.append(alns_solution)
+    best_hybrid = min(alns_results, key=lambda x: (x.fit, x.tard, x.su))
+    rows = []
+    for sol in alns_results:
+        rows.append({
+            "case_file": case_file,
+            "seed": seed,
+            "start_rank": sol.start_rank,
+            "start_label": sol.start_label,
+            "start_fitness": sol.start_fitness,
+            "start_tardiness": sol.start_tardiness,
+            "start_setups": sol.start_setups,
+            "start_diversity": sol.start_diversity,
+            "ALNS_fitness": sol.fit,
+            "ALNS_tardiness": sol.tard,
+            "ALNS_setups": sol.su,
+            "ALNS_runtime": getattr(sol, "alns_rt", np.nan),
+            "ALNS_iterations": getattr(sol, "alns_it", np.nan),
+            "ALNS_stop_reason": getattr(sol, "alns_stop", "unknown"),
+            "is_best_hybrid_start": sol is best_hybrid,
+        })
+    summary = {
+        "case_file": case_file,
+        "seed": seed,
+        "PH_fitness": ph_solution.fit,
+        "PH_tardiness": ph_solution.tard,
+        "PH_setups": ph_solution.su,
+        "PH_runtime": ph_runtime,
+        "MH_fitness": mh_solution.fit,
+        "MH_tardiness": mh_solution.tard,
+        "MH_setups": mh_solution.su,
+        "MH_runtime": getattr(mh_solution, "runtime", np.nan),
+        "MH_generations": getattr(mh_solution, "generations", np.nan),
+        "MH_stop_reason": getattr(mh_solution, "stop_reason", "unknown"),
+        "GA_archive_unique_size": len(ga_archive),
+        "Hybrid_fitness": best_hybrid.fit,
+        "Hybrid_tardiness": best_hybrid.tard,
+        "Hybrid_setups": best_hybrid.su,
+        "ILP_final_fitness": best_hybrid.fit,
+        "ILP_final_tardiness": best_hybrid.tard,
+        "ILP_final_setups": best_hybrid.su,
+        "Hybrid_ALNS_runtime": getattr(best_hybrid, "alns_rt", np.nan),
+        "Hybrid_total_runtime": ph_runtime + getattr(mh_solution, "runtime", 0.0) + sum(getattr(s, "alns_rt", 0.0) for s in alns_results),
+        "Best_ALNS_start_label": getattr(best_hybrid, "start_label", "unknown"),
+        "Best_ALNS_start_rank": getattr(best_hybrid, "start_rank", np.nan),
+    }
+    return summary, rows, {
+        "ph_solution": ph_solution,
+        "mh_solution": mh_solution,
+        "ga_starts": starts,
+        "alns_results": alns_results,
+        "best_hybrid": best_hybrid,
+        "ga_archive": ga_archive,
+    }
+
+def run_hybrid_experiments(case_files, seeds=range(10), show_progress=True, **kwargs):
+    all_summaries = []
+    all_start_rows = []
+    case_iterator = tqdm(list(case_files), desc="Cases", disable=not show_progress)
+    for case_file in case_iterator:
+        case_iterator.set_postfix(case=os.path.basename(str(case_file)))
+        seed_iterator = tqdm(list(seeds), desc=f"Seeds {os.path.basename(str(case_file))}", leave=False, disable=not show_progress)
+        for seed in seed_iterator:
+            msg = f"Running strict PH -> GA/MH -> ALNS-AOS -> ILP | case={case_file} | seed={seed}"
+            if show_progress:
+                tqdm.write(msg)
+            else:
+                print(msg)
+            summary, start_rows, _ = run_ph_mh_alns_aos_on_file(case_file=case_file, seed=int(seed), show_progress=show_progress, **kwargs)
+            all_summaries.append(summary)
+            all_start_rows.extend(start_rows)
+    summary_df = pd.DataFrame(all_summaries)
+    starts_df = pd.DataFrame(all_start_rows)
+    print("\nSummary results:")
+    print(summary_df.to_string(index=False))
+    return summary_df, starts_df
+
+def run_ph_mh_alns_aos_on_jobs_data(jobs_data, num_machines, magazine_capacity, case_label="custom_instance", seed=0, mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, reset_seed_per_alns_start=True, verbose=False, show_progress=True):
     random.seed(seed)
     np.random.seed(seed)
     TL_SIZES.clear()
-    TL_SIZES.update({o["tool_set"]: o["size"] for o in jobs})
-    ops_by_j = get_ops_j(jobs)
-    dec = Dec(ops_by_j, nm, cap, SETUP_TIME)
+    TL_SIZES.update({op["tool_set"]: op["size"] for op in jobs_data})
+    ops_by_job = build_ops_by_job(jobs_data)
+    decoder = Dec(ops_by_job, num_machines, magazine_capacity, SETUP_TIME)
     t0 = time.time()
-    ph = PracHeur(jobs, nm, cap).run()
-    dec.eval_ind(ph)
-    ph_rt = time.time() - t0
-    mh = MHArch(jobs, nm, cap)
-    mh_sol, arch = mh.run_arch(max_t=mh_t, stagn=mh_st, pop_sz=pop_sz, max_g=max_g, show_pr=show_pr, pr_desc=f"GA/MH {lbl} S={seed}")
-    dec.eval_ind(mh_sol)
-    starts = sel_best(arch)
-    alns_res = []
-    for idx, start_ind in enumerate(starts, start=1):
-        if rst_seed:
-            random.seed(seed * 1000 + idx)
-            np.random.seed(seed * 1000 + idx)
-        start_ind = clone_i(start_ind)
-        dec.eval_ind(start_ind)
-        alns_eng = Alns(jobs, nm, cap)
-        alns_sol = alns_eng.run(start_ind, max_it=alns_it, max_t=alns_t, stagn=alns_st, show_pr=show_pr, pr_desc=f"ALNS {lbl} S={seed}")
-        dec.eval_ind(alns_sol)
-        alns_sol.start_label = getattr(start_ind, "source_label", f"GA_start_{idx}")
-        alns_sol.start_rank = idx
-        alns_sol.start_fit = float(start_ind.fit)
-        alns_sol.start_tard = float(start_ind.tard)
-        alns_sol.start_su = int(start_ind.su)
-        alns_res.append(alns_sol)
-    b_hy = min(alns_res, key=lambda x: (x.fit, x.tard, x.su))
-    rows = []
-    for sol in alns_res:
-        row = {
-            "seed": seed, "start_rank": sol.start_rank, "start_label": sol.start_label,
-            "start_fitness": sol.start_fit, "start_tardiness": sol.start_tard, "start_setups": sol.start_su,
-            "ALNS_fitness": sol.fit, "ALNS_tardiness": sol.tard, "ALNS_setups": sol.su,
-            "ALNS_runtime": getattr(sol, "alns_rt", np.nan), "ALNS_iterations": getattr(sol, "alns_it", np.nan),
-            "ALNS_stop_reason": getattr(sol, "alns_stop", "unknown"), "is_best_hybrid_start": sol is b_hy
-        }
-        if is_f:
-            row["case_file"] = lbl
-        else:
-            row["case_label"] = lbl
-        rows.append(row)
-    sum_dict = {
-        "seed": seed, "PH_fitness": ph.fit, "PH_tardiness": ph.tard, "PH_setups": ph.su, "PH_runtime": ph_rt,
-        "MH_fitness": mh_sol.fit, "MH_tardiness": mh_sol.tard, "MH_setups": mh_sol.su, "MH_runtime": getattr(mh_sol, "runtime", np.nan),
-        "MH_generations": getattr(mh_sol, "generations", np.nan), "MH_stop_reason": getattr(mh_sol, "stop_reason", "unknown"),
-        "GA_archive_unique_size": len(arch), "Hybrid_fitness": b_hy.fit, "Hybrid_tardiness": b_hy.tard, "Hybrid_setups": b_hy.su,
-        "ILP_final_fitness": b_hy.fit, "ILP_final_tardiness": b_hy.tard, "ILP_final_setups": b_hy.su,
-        "Hybrid_ALNS_runtime": getattr(b_hy, "alns_rt", np.nan), "Hybrid_total_runtime": ph_rt + getattr(mh_sol, "runtime", 0.0) + sum(getattr(s, "alns_rt", 0.0) for s in alns_res),
-        "Best_ALNS_start_label": getattr(b_hy, "start_label", "unknown"), "Best_ALNS_start_rank": getattr(b_hy, "start_rank", np.nan)
+    ph_engine = PracHeur(jobs_data, num_machines, magazine_capacity)
+    ph_solution = ph_engine.run()
+    decoder.eval_ind(ph_solution)
+    ph_runtime = time.time() - t0
+    mh_engine = MatheuristicWithArchive(jobs_data, num_machines, magazine_capacity)
+    mh_solution, ga_archive = mh_engine.run_with_archive(max_time_seconds=mh_time_seconds, no_improvement_limit=mh_no_improvement_limit, pop_size=mh_pop_size, max_generations=mh_max_generations, record_history=True, verbose=verbose, show_progress=show_progress, progress_desc=f"GA/MH {case_label} seed={seed}")
+    decoder.eval_ind(mh_solution)
+    starts = select_best_ga_solution(ga_archive)
+    alns_results = []
+    start_iterator = tqdm(list(enumerate(starts, start=1)), desc=f"ALNS starts {case_label} seed={seed}", leave=False, disable=not show_progress)
+    for idx, start_ind in start_iterator:
+        if reset_seed_per_alns_start:
+            alns_seed = seed * 1000 + idx
+            random.seed(alns_seed)
+            np.random.seed(alns_seed)
+        start_ind = clone_individual(start_ind)
+        decoder.eval_ind(start_ind)
+        if show_progress:
+            start_iterator.set_postfix(start=getattr(start_ind, "source_label", f"GA_start_{idx}"), fit=round(float(start_ind.fit), 2))
+        alns_engine = Alns(jobs_data, num_machines, magazine_capacity, SETUP_TIME)
+        alns_solution = alns_engine.run(start_ind, max_it=alns_iterations, max_t=alns_time_seconds, stagn=alns_no_improvement_limit, record_h=True, show_pr=show_progress, pr_desc=f"ALNS {case_label} seed={seed} start={idx}/{len(starts)}")
+        decoder.eval_ind(alns_solution)
+        alns_solution.start_label = getattr(start_ind, "source_label", f"GA_start_{idx}")
+        alns_solution.start_rank = idx
+        alns_solution.start_fitness = float(start_ind.fit)
+        alns_solution.start_tardiness = float(start_ind.tard)
+        alns_solution.start_setups = int(start_ind.su)
+        alns_solution.start_diversity = float(getattr(start_ind, "source_diversity", 0.0))
+        alns_results.append(alns_solution)
+    best_hybrid = min(alns_results, key=lambda x: (x.fit, x.tard, x.su))
+    start_rows = []
+    for sol in alns_results:
+        start_rows.append({
+            "case_label": case_label,
+            "seed": seed,
+            "start_rank": sol.start_rank,
+            "start_label": sol.start_label,
+            "start_fitness": sol.start_fitness,
+            "start_tardiness": sol.start_tardiness,
+            "start_setups": sol.start_setups,
+            "start_diversity": sol.start_diversity,
+            "ALNS_fitness": sol.fit,
+            "ALNS_tardiness": sol.tard,
+            "ALNS_setups": sol.su,
+            "ALNS_runtime": getattr(sol, "alns_rt", np.nan),
+            "ALNS_iterations": getattr(sol, "alns_it", np.nan),
+            "ALNS_stop_reason": getattr(sol, "alns_stop", "unknown"),
+            "is_best_hybrid_start": sol is best_hybrid,
+        })
+    summary = {
+        "case_label": case_label,
+        "seed": seed,
+        "PH_fitness": ph_solution.fit,
+        "PH_tardiness": ph_solution.tard,
+        "PH_setups": ph_solution.su,
+        "PH_runtime": ph_runtime,
+        "MH_fitness": mh_solution.fit,
+        "MH_tardiness": mh_solution.tard,
+        "MH_setups": mh_solution.su,
+        "MH_runtime": getattr(mh_solution, "runtime", np.nan),
+        "MH_generations": getattr(mh_solution, "generations", np.nan),
+        "MH_stop_reason": getattr(mh_solution, "stop_reason", "unknown"),
+        "GA_archive_unique_size": len(ga_archive),
+        "Hybrid_fitness": best_hybrid.fit,
+        "Hybrid_tardiness": best_hybrid.tard,
+        "Hybrid_setups": best_hybrid.su,
+        "ILP_final_fitness": best_hybrid.fit,
+        "ILP_final_tardiness": best_hybrid.tard,
+        "ILP_final_setups": best_hybrid.su,
+        "Hybrid_ALNS_runtime": getattr(best_hybrid, "alns_rt", np.nan),
+        "Hybrid_total_runtime": ph_runtime + getattr(mh_solution, "runtime", 0.0) + sum(getattr(s, "alns_rt", 0.0) for s in alns_results),
+        "Best_ALNS_start_label": getattr(best_hybrid, "start_label", "unknown"),
+        "Best_ALNS_start_rank": getattr(best_hybrid, "start_rank", np.nan),
     }
-    if is_f:
-        sum_dict["case_file"] = lbl
-    else:
-        sum_dict["case_label"] = lbl
-    return sum_dict, rows, {"ph_solution": ph, "mh_solution": mh_sol, "ga_starts": starts, "alns_results": alns_res, "best_hybrid": b_hy, "ga_archive": arch}
+    return summary, start_rows, {
+        "ph_solution": ph_solution,
+        "mh_solution": mh_solution,
+        "ga_starts": starts,
+        "alns_results": alns_results,
+        "best_hybrid": best_hybrid,
+        "ga_archive": ga_archive,
+    }
 
-def run_ph_mh_alns_aos_on_file(case_file, seed=0, mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, reset_seed_per_alns_start=True, verbose=False, show_progress=True):
-    ops, nm, cap = load_actual_kmwe_instance(case_file)
-    return run_hybrid_d(ops, nm, cap, case_file, True, seed, mh_time_seconds, mh_no_improvement_limit, mh_pop_size, mh_max_generations, alns_time_seconds, alns_iterations, alns_no_improvement_limit, reset_seed_per_alns_start, verbose, show_progress)
-
-def run_ph_mh_alns_aos_on_jobs_data(jobs_data, num_machines, magazine_capacity, case_label="custom_instance", seed=0, mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, reset_seed_per_alns_start=True, verbose=False, show_progress=True):
-    return run_hybrid_d(jobs_data, num_machines, magazine_capacity, case_label, False, seed, mh_time_seconds, mh_no_improvement_limit, mh_pop_size, mh_max_generations, alns_time_seconds, alns_iterations, alns_no_improvement_limit, reset_seed_per_alns_start, verbose, show_progress)
-
-def run_hybrid_experiments(case_files, seeds=range(10), show_progress=True, **kwargs):
-    all_sums, all_starts = [], []
-    for cf in tqdm(list(case_files), desc="Cases", disable=not show_progress):
-        for sd in tqdm(list(seeds), desc=f"Seeds {os.path.basename(str(cf))}", leave=False, disable=not show_progress):
-            sum_d, starts, _ = run_ph_mh_alns_aos_on_file(cf, int(sd), show_progress=show_progress, **kwargs)
-            all_sums.append(sum_d)
-            all_starts.extend(starts)
-    return pd.DataFrame(all_sums), pd.DataFrame(all_starts)
-
-def agg_rec(records, group_col):
+def _aggregate_hybrid_records(records, group_col):
+    rows = []
     df = pd.DataFrame(records)
     if df.empty:
         return pd.DataFrame()
-    rows = []
     for key, g in df.groupby(group_col, sort=False):
-        ph, mh, hy = g["PH_fitness"].astype(float), g["MH_fitness"].astype(float), g["Hybrid_fitness"].astype(float)
-        ph_mean, mh_mean, hy_mean = float(ph.mean()), float(mh.mean()), float(hy.mean())
-        best_m = min({"PH": ph_mean, "MH": mh_mean, "ALNS": hy_mean}, key=lambda k: {"PH": ph_mean, "MH": mh_mean, "ALNS": hy_mean}[k])
+        ph = g["PH_fitness"].astype(float)
+        mh = g["MH_fitness"].astype(float)
+        hy = g["Hybrid_fitness"].astype(float)
+        ph_mean = float(ph.mean())
+        mh_mean = float(mh.mean())
+        hy_mean = float(hy.mean())
+        means = {"PH": ph_mean, "MH": mh_mean, "ALNS": hy_mean}
+        best_method = min(means, key=means.get)
         rows.append({
             group_col: key,
-            "PH_μ": round(ph_mean, 2), "PH_σ": round(float(ph.std(ddof=0)), 2), "PH_best": round(float(ph.min()), 2), "PH_C.T.(s)": round(float(g["PH_runtime"].mean()), 3),
-            "MH_μ": round(mh_mean, 2), "MH_σ": round(float(mh.std(ddof=0)), 2), "MH_best": round(float(mh.min()), 2), "MH_C.T.(s)": round(float(g["MH_runtime"].mean()), 3),
+            "PH_μ": round(ph_mean, 2),
+            "PH_σ": round(float(ph.std(ddof=0)), 2),
+            "PH_best": round(float(ph.min()), 2),
+            "PH_C.T.(s)": round(float(g["PH_runtime"].mean()), 3),
+            "MH_μ": round(mh_mean, 2),
+            "MH_σ": round(float(mh.std(ddof=0)), 2),
+            "MH_best": round(float(mh.min()), 2),
+            "MH_C.T.(s)": round(float(g["MH_runtime"].mean()), 3),
             "MH_gen_μ": round(float(g["MH_generations"].mean()), 1),
-            "ALNS_μ": round(hy_mean, 2), "ALNS_σ": round(float(hy.std(ddof=0)), 2), "ALNS_best": round(float(hy.min()), 2),
-            "ALNS_C.T.(s)": round(float(g["Hybrid_total_runtime"].mean()), 3), "ALNS_phase_C.T.(s)": round(float(g["Hybrid_ALNS_runtime"].mean()), 3),
+            "ALNS_μ": round(hy_mean, 2),
+            "ALNS_σ": round(float(hy.std(ddof=0)), 2),
+            "ALNS_best": round(float(hy.min()), 2),
+            "ALNS_C.T.(s)": round(float(g["Hybrid_total_runtime"].mean()), 3),
+            "ALNS_phase_C.T.(s)": round(float(g["Hybrid_ALNS_runtime"].mean()), 3),
             "ALNS_it_μ": round(float(g["Hybrid_ALNS_iterations"].mean()), 1),
             "StopReasons": ",".join(sorted(set(map(str, g["MH_stop_reason"])))),
             "ALNS_StopReasons": ",".join(sorted(set(map(str, g["Hybrid_ALNS_stop_reason"])))),
             "Gap_MH_vs_PH (%)": f"{((mh_mean - ph_mean) / max(1.0, ph_mean)) * 100.0:.2f}%",
             "Gap_ALNS_vs_PH (%)": f"{((hy_mean - ph_mean) / max(1.0, ph_mean)) * 100.0:.2f}%",
             "Gap_ALNS_vs_MH (%)": f"{((hy_mean - mh_mean) / max(1.0, mh_mean)) * 100.0:.2f}%",
-            "Best_Method": best_m, "Best_μ": round(ph_mean if best_m == "PH" else (mh_mean if best_m == "MH" else hy_mean), 2)
+            "Best_Method": best_method,
+            "Best_μ": round(float(means[best_method]), 2),
         })
     return pd.DataFrame(rows)
 
-def tbl8_fmt(records):
-    f = agg_rec(records, "n")
-    if f.empty:
-        return f
+def _paper_like_table8_from_hybrid(run_records):
+    full = _aggregate_hybrid_records(run_records, "n")
+    if full.empty:
+        return full
     cols = ["n", "PH_μ", "PH_σ", "PH_best", "PH_C.T.(s)", "MH_μ", "MH_σ", "MH_best", "MH_C.T.(s)", "MH_gen_μ", "StopReasons", "Gap_MH_vs_PH (%)", "ALNS_μ", "ALNS_σ", "ALNS_best", "ALNS_C.T.(s)", "ALNS_phase_C.T.(s)", "ALNS_it_μ", "ALNS_StopReasons", "Gap_ALNS_vs_PH (%)", "Gap_ALNS_vs_MH (%)", "Best_Method", "Best_μ"]
-    return f[cols]
+    return full[cols]
 
-def tbl14_fmt(records):
-    f = agg_rec(records, "BaseCase")
-    if f.empty:
-        return f
+def _paper_like_table14_from_hybrid(run_records):
+    full = _aggregate_hybrid_records(run_records, "BaseCase")
+    if full.empty:
+        return full
     cols = ["BaseCase", "PH_μ", "PH_σ", "PH_best", "PH_C.T.(s)", "MH_μ", "MH_σ", "MH_best", "MH_C.T.(s)", "MH_gen_μ", "StopReasons", "Gap_MH_vs_PH (%)", "ALNS_μ", "ALNS_σ", "ALNS_best", "ALNS_C.T.(s)", "ALNS_phase_C.T.(s)", "ALNS_it_μ", "ALNS_StopReasons", "Gap_ALNS_vs_PH (%)", "Gap_ALNS_vs_MH (%)", "Best_Method", "Best_μ"]
-    return f[cols].rename(columns={"Gap_MH_vs_PH (%)": "Net_Gap_MH (%)"})
+    return full[cols].rename(columns={"Gap_MH_vs_PH (%)": "Net_Gap_MH (%)"})
 
-def enrich_sum(summary, objects):
-    b = objects["best_hybrid"]
-    summary["Hybrid_ALNS_iterations"] = getattr(b, "alns_it", np.nan)
-    summary["Hybrid_ALNS_stop_reason"] = getattr(b, "alns_stop", "unknown")
+def _enrich_summary_with_best_alns_metadata(summary, objects):
+    best_hybrid = objects["best_hybrid"]
+    summary["Hybrid_ALNS_iterations"] = getattr(best_hybrid, "alns_it", np.nan)
+    summary["Hybrid_ALNS_stop_reason"] = getattr(best_hybrid, "alns_stop", "unknown")
     return summary
 
-def run_t8(num_runs=10, mh_t=MAX_TIME_SECONDS, mh_st=NO_IMPROVEMENT_LIMIT, pop_sz=POP_SIZE, max_g=None, alns_t=600.0, alns_it=2000, alns_st=500, show_pr=True, verbose=False):
-    cf = resolve_kmwe_case_file("6M140")
-    jobs, nm, cap = load_actual_kmwe_instance(cf)
-    df_sorted = pd.DataFrame(jobs).sort_values(by="r").copy()
-    run_recs, start_recs = [], []
-    n_vals = [15, 25, 30, 60, 90, 120, 140]
-    n_iter = tqdm(n_vals, desc="T8 n-slices", disable=not show_pr)
-    for n_slice in n_iter:
-        n_iter.set_postfix(n=n_slice)
+def run_hybrid_table8_replications(num_runs=10, mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True, verbose=False):
+    print("\n[EXACT REPLICATION: TABLE 8 - Operational Scaling Framework on 6M140]")
+    case_file = resolve_kmwe_case_file("6M140")
+    full_jobs_data, m_val, c_val = load_actual_kmwe_instance(case_file)
+    df_sorted = pd.DataFrame(full_jobs_data).sort_values(by="r").copy()
+    run_records = []
+    start_records = []
+    n_values = [15, 25, 30, 60, 90, 120, 140]
+    n_iterator = tqdm(n_values, desc="Table 8 n-slices", disable=not show_progress)
+    for n_slice in n_iterator:
+        n_iterator.set_postfix(n=n_slice)
         sliced_ops = df_sorted.head(n_slice).to_dict(orient="records")
-        seed_iter = tqdm(range(num_runs), desc=f"Seeds n={n_slice}", leave=False, disable=not show_pr)
-        for seed in seed_iter:
-            sum_d, starts, objs = run_ph_mh_alns_aos_on_jobs_data(sliced_ops, nm, cap, f"6M140_n{n_slice}", seed, mh_t, mh_st, pop_sz, max_g, alns_t, alns_it, alns_st, True, verbose, show_pr)
-            sum_d = enrich_sum(sum_d, objs)
-            sum_d["n"] = n_slice
-            for r in starts:
-                r["n"] = n_slice
-            run_recs.append(sum_d)
-            start_recs.extend(starts)
-    return tbl8_fmt(run_recs), pd.DataFrame(run_recs), pd.DataFrame(start_recs)
+        seed_iterator = tqdm(range(num_runs), desc=f"Seeds n={n_slice}", leave=False, disable=not show_progress)
+        for seed in seed_iterator:
+            random.seed(int(seed))
+            np.random.seed(int(seed))
+            summary, starts, objects = run_ph_mh_alns_aos_on_jobs_data(sliced_ops, num_machines=m_val, magazine_capacity=c_val, case_label=f"6M140_n{n_slice}", seed=int(seed), mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, verbose=verbose, show_progress=show_progress)
+            summary = _enrich_summary_with_best_alns_metadata(summary, objects)
+            summary["n"] = n_slice
+            for row in starts:
+                row["n"] = n_slice
+            run_records.append(summary)
+            start_records.extend(starts)
+    summary_df = _paper_like_table8_from_hybrid(run_records)
+    print(summary_df.to_string(index=False))
+    return summary_df, pd.DataFrame(run_records), pd.DataFrame(start_records)
 
-def run_t14(num_runs=10, cases=("2M38", "2M46", "6M140", "6M163"), mh_t=MAX_TIME_SECONDS, mh_st=NO_IMPROVEMENT_LIMIT, pop_sz=POP_SIZE, max_g=None, alns_t=600.0, alns_it=2000, alns_st=500, show_pr=True, verbose=False):
-    run_recs, start_recs = [], []
-    c_iter = tqdm(cases, desc="T14 cases", disable=not show_pr)
-    for name in c_iter:
-        c_iter.set_postfix(case=name)
-        cf = resolve_kmwe_case_file(name)
-        seed_iter = tqdm(range(num_runs), desc=f"Seeds {name}", leave=False, disable=not show_pr)
-        for seed in seed_iter:
-            sum_d, starts, objs = run_ph_mh_alns_aos_on_file(cf, seed, mh_t, mh_st, pop_sz, max_g, alns_t, alns_it, alns_st, True, verbose, show_pr)
-            sum_d = enrich_sum(sum_d, objs)
-            sum_d["BaseCase"] = name
-            for r in starts:
-                r["BaseCase"] = name
-            run_recs.append(sum_d)
-            start_recs.extend(starts)
-    return tbl14_fmt(run_recs), pd.DataFrame(run_recs), pd.DataFrame(start_recs)
+def run_hybrid_table14_replications(num_runs=10, case_names=("2M38", "2M46", "6M140", "6M163"), mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True, verbose=False):
+    print("\n[EXACT REPLICATION: TABLE 14 - Production Base-Case Workcenters]")
+    run_records = []
+    start_records = []
+    case_iterator = tqdm(list(case_names), desc="Table 14 cases", disable=not show_progress)
+    for case_name in case_iterator:
+        case_iterator.set_postfix(case=case_name)
+        case_file = resolve_kmwe_case_file(case_name)
+        seed_iterator = tqdm(range(num_runs), desc=f"Seeds {case_name}", leave=False, disable=not show_progress)
+        for seed in seed_iterator:
+            random.seed(int(seed))
+            np.random.seed(int(seed))
+            summary, starts, objects = run_ph_mh_alns_aos_on_file(case_file=case_file, seed=int(seed), mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, verbose=verbose, show_progress=show_progress)
+            summary = _enrich_summary_with_best_alns_metadata(summary, objects)
+            summary["BaseCase"] = case_name
+            for row in starts:
+                row["BaseCase"] = case_name
+            run_records.append(summary)
+            start_records.extend(starts)
+    summary_df = _paper_like_table14_from_hybrid(run_records)
+    print(summary_df.to_string(index=False))
+    return summary_df, pd.DataFrame(run_records), pd.DataFrame(start_records)
 
-def run_reps(num_runs=10, mh_t=MAX_TIME_SECONDS, mh_st=NO_IMPROVEMENT_LIMIT, pop_sz=POP_SIZE, max_g=None, alns_t=600.0, alns_it=2000, alns_st=500, show_pr=True, verbose=False, out_xls="hybrid_ph_mh_alns_seed_results.xlsx"):
-    t8_s, t8_r, t8_st = run_t8(num_runs, mh_t, mh_st, pop_sz, max_g, alns_t, alns_it, alns_st, show_pr, verbose)
-    t14_s, t14_r, t14_st = run_t14(num_runs, ("2M38", "2M46", "6M140", "6M163"), mh_t, mh_st, pop_sz, max_g, alns_t, alns_it, alns_st, show_pr, verbose)
-    export_seed_results_to_excel(out_xls, table8_summary=t8_s, table8_seed_results=t8_r, table8_alns_starts=t8_st, table14_summary=t14_s, table14_seed_results=t14_r, table14_alns_starts=t14_st)
-    return {"table8_summary": t8_s, "table8_runs": t8_r, "table8_starts": t8_st, "table14_summary": t14_s, "table14_runs": t14_r, "table14_starts": t14_st}
+def run_exact_hybrid_replications(num_runs=10, mh_time_seconds=MAX_TIME_SECONDS, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, mh_pop_size=POP_SIZE, mh_max_generations=None, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True, verbose=False, output_excel="hybrid_ph_mh_alns_seed_results.xlsx"):
+    print(f" REPLICATING EXACT TABLES ({num_runs} SEED SAMPLES) ")
+    table8_summary, table8_runs, table8_starts = run_hybrid_table8_replications(num_runs=num_runs, mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, show_progress=show_progress, verbose=verbose)
+    table14_summary, table14_runs, table14_starts = run_hybrid_table14_replications(num_runs=num_runs, mh_time_seconds=mh_time_seconds, mh_no_improvement_limit=mh_no_improvement_limit, mh_pop_size=mh_pop_size, mh_max_generations=mh_max_generations, alns_time_seconds=alns_time_seconds, alns_iterations=alns_iterations, alns_no_improvement_limit=alns_no_improvement_limit, show_progress=show_progress, verbose=verbose)
+    export_seed_results_to_excel(output_excel, table8_summary=table8_summary, table8_seed_results=table8_runs, table8_alns_starts=table8_starts, table14_summary=table14_summary, table14_seed_results=table14_runs, table14_alns_starts=table14_starts)
+    return {"table8_summary": table8_summary, "table8_runs": table8_runs, "table8_starts": table8_starts, "table14_summary": table14_summary, "table14_runs": table14_runs, "table14_starts": table14_starts}
 
-run_reps(num_runs=10, mh_t=3600.0, mh_st=NO_IMPROVEMENT_LIMIT, alns_t=600.0, alns_it=2000, alns_st=500, show_pr=True)
+def run_exact_paper_replications(num_runs=10, output_excel="hybrid_ph_mh_alns_seed_results.xlsx"):
+    return run_exact_hybrid_replications(num_runs=num_runs, output_excel=output_excel)
+
+
+run_exact_hybrid_replications(num_runs=10, mh_time_seconds=3600.0, mh_no_improvement_limit=NO_IMPROVEMENT_LIMIT, alns_time_seconds=600.0, alns_iterations=2000, alns_no_improvement_limit=500, show_progress=True)
