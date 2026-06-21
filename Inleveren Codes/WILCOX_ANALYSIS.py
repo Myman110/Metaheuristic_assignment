@@ -3,7 +3,7 @@ import numpy as np
 from scipy.stats import wilcoxon
 from itertools import combinations
 
-FILES = {"Baseline": "Baseline_paper_results.xlsx", "ALNS_AOS": "alns_aos_table8_table14_seed_results.xlsx", "Hybrid_GA_ALNS": "hybrid_ph_mh_alns_seed_results.xlsx", "ALNS_Q_learning": "alns_QL_table8_table14_seed_results.xlsx"}
+FILES = {"Baseline": "paper_replication_seed_results.xlsx", "ALNS_AOS": "alns_aos_table8_table14_seed_results.xlsx", "Hybrid_GA_ALNS": "hybrid_ph_mh_alns_seed_results.xlsx", "ALNS_Q_learning": "alns_table8_table14_all_seed_results_QL.xlsx"}
 
 outfile = "Final_results.xlsx"
 
